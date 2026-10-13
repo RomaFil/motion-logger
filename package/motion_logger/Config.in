@@ -1,0 +1,5 @@
+config BR2_PACKAGE_MOTION_LOGGER
+	bool "motion_logger"
+	help
+	  Motion logger for Raspberry Pi 5: reads accelerometers and GPS,
+	  detects movement and writes a log (Ajax Embedded Linux Internship).

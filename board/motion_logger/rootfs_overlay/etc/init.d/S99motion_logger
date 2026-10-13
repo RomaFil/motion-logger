@@ -1,0 +1,30 @@
+#!/bin/sh
+# Автозапуск motion_logger (BusyBox init викликає S* скрипти з аргументом start / stop).
+# Лише POSIX sh: на платі це BusyBox ash, без bash-конструкцій.
+DAEMON=/usr/bin/motion_logger
+PIDFILE=/var/run/motion_logger.pid
+
+start() {
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "motion_logger: already running"
+		return 1
+	fi
+	"$DAEMON" &
+	echo $! > "$PIDFILE"
+	echo "motion_logger: started"
+}
+
+stop() {
+	if [ -f "$PIDFILE" ]; then
+		kill "$(cat "$PIDFILE")" 2>/dev/null
+		rm -f "$PIDFILE"
+	fi
+	echo "motion_logger: stopped"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac
