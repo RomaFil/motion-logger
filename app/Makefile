@@ -4,6 +4,7 @@
 #   make STATIC=1                           статична збірка (без залежності від libc на цілі)
 #   make DEBUG=1                            з відладочною інформацією
 #   make test                               зібрати й запустити тести (лише на цьому комп'ютері)
+#   make test-tsan                          те саме з ThreadSanitizer (перевірка гонок даних)
 #   make format-check | format              перевірити / виправити стиль коду (clang-format)
 #   make clean | help
 # Buildroot викликає: make CC=... CFLAGS=... BUILD=...  (див. package/motion_logger/motion_logger.mk)
@@ -23,8 +24,9 @@ endif
 # Обов'язкові прапорці дописуємо через override: змінна CFLAGS з командного рядка
 # (так її передає Buildroot) інакше перекрила б наші -std/-Wall/-MMD.
 CFLAGS ?=
-override CFLAGS += -std=c11 -Wall -Wextra $(OPT) -MMD -MP -Iinterfaces -Icore
+override CFLAGS += -std=c11 -Wall -Wextra $(OPT) -MMD -MP -pthread -Iinterfaces -Icore
 LDFLAGS ?=
+override LDFLAGS += -pthread
 ifeq ($(STATIC),1)
   override LDFLAGS += -static
 endif
@@ -61,6 +63,16 @@ $(TEST_TARGET): $(TEST_OBJS)
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
+# Те саме, але з перевіркою гонок даних (ThreadSanitizer): очікуємо 0 попереджень.
+TSAN_TARGET := $(BUILD)/test_ring_buffer_tsan
+
+$(TSAN_TARGET): tests/test_ring_buffer.c core/ring_buffer.c core/ring_buffer.h
+	@mkdir -p $(@D)
+	$(CC) -std=c11 -Wall -Wextra -g -O1 -fsanitize=thread -pthread -Icore -o $@ tests/test_ring_buffer.c core/ring_buffer.c
+
+test-tsan: $(TSAN_TARGET)
+	./$(TSAN_TARGET)
+
 format-check:
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 
@@ -76,7 +88,8 @@ help:
 	@echo "make STATIC=1                          - статична збірка"
 	@echo "make DEBUG=1                           - з відладкою"
 	@echo "make test                              - тести"
+	@echo "make test-tsan                         - тести з ThreadSanitizer"
 	@echo "make format-check | format             - стиль коду"
 	@echo "make clean | help"
 
-.PHONY: all test format-check format clean help
+.PHONY: all test test-tsan format-check format clean help
