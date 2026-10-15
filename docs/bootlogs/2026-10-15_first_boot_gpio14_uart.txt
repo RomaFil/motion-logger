@@ -1,0 +1,39 @@
+# Перший успішний запуск власного образу Buildroot на Raspberry Pi 5 (16 ГБ, D0), 15.10.2026
+# Канал: GPIO14 (пін 8, TX) -> USB-UART PL2303 -> PuTTY, COM15, 115200 8N1; RX (пін 10) не підключено
+# Образ: Buildroot 2026.08, raspberrypi5_defconfig, ядро raspberrypi/linux 6.12.61 (4K сторінки),
+#        getty на ttyAMA0 115200 (BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0")
+# boot: config.txt = kernel=Image, disable_overscan=1, enable_uart=1, enable_rp1_uart=1
+#       overlays/bcm2712d0.dtbo (D0), overlays/overlay_map.dtb
+#       cmdline.txt = root=/dev/mmcblk0p2 rootwait console=tty1 console=ttyAMA10,115200
+# Примітка: повідомлення ядра на GPIO14 не видно (драйвер pl011-axi не дає консоль ядра), видно лог прошивки і запрошення getty.
+
+RP1_UART 0000001c00030000
+  9.53 MESS:00:00:09.536927:0: board: boardrev e04171 otp e04171
+  9.43 Read /config.txt bytes      677 hnd 0x78
+  9.54 MESS:00:00:09.549923:0: Initial voltage 800000 temp 36181
+  9.75 MESS:00:00:09.750231:0: avs_2712: AVS pred 8320 832000 temp 37280
+  9.75 MESS:00:00:09.753875:0: vpred 832 mV +0
+  9.75 MESS:00:00:09.758027:0: over-voltage idle: 0 avs: 72000 delta: 0 (0x00000000)
+  9.76 MESS:00:00:09.768613:0: FB framebuffer_swap 1
+  9.77 MESS:00:00:09.770505:0: Select resolution HDMI0/2 hotplug 0 max_mode 2
+  9.77 MESS:00:00:09.777406:0: Select resolution HDMI1/2 hotplug 0 max_mode 2
+  9.78 MESS:00:00:09.784408:0: dtb_file 'bcm2712-rpi-5-b.dtb'
+  9.78 Loading 'bcm2712-rpi-5-b.dtb' to 0x00000000 offset 0x100
+  9.00 Read bcm2712-rpi-5-b.dtb bytes    78744 hnd 0x2
+  9.17 Read /overlays/overlay_map.dtb bytes     5971 hnd 0x2ef8
+  9.24 Read /overlays/bcm2712d0.dtbo bytes     1363 hnd 0x2ef7
+  9.83 MESS:00:00:09.837943:0: Loaded overlay 'bcm2712d0'
+  9.87 PCIEx1: PWR 0 DET_WAKE 0
+  9.84 Read /config.txt bytes      677 hnd 0x78
+  9.21 Read /cmdline.txt bytes       66 hnd 0x77
+  9.92 MESS:00:00:09.923489:0: Read command line from file 'cmdline.txt':
+  9.93 MESS:00:00:09.930014:0: 'root=/dev/mmcblk0p2 rootwait console=tty1 console=ttyAMA10,115200'
+ 10.05 MESS:00:00:10.051495:0: RPM 0, max RPM 0
+ 10.06 BMD "armstub8-2712.bin" not found
+ 10.67 fs_open: 'armstub8-2712.bin'
+ 10.07 Loading 'Image' to 0x00000000 offset 0x200000
+ 11.05 Read Image bytes 24365568 hnd 0x79
+ 11.10 MESS:00:00:11.106213:0: Device tree loaded to 0x2efec500 (size 0x13a27)
+
+Welcome to Buildroot
+buildroot login:
