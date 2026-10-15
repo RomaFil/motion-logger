@@ -3,14 +3,24 @@
 # Лише POSIX sh: на платі це BusyBox ash, без bash-конструкцій.
 DAEMON=/usr/bin/motion_logger
 PIDFILE=/var/run/motion_logger.pid
+# Налагоджувальний порт DBG1 (GPIO14/15). Повідомлення ядра й init-скриптів ідуть на
+# консоль ядра (ttyAMA10, JST-роз'єм), а на ttyAMA0 їх треба спрямувати самим.
+DEBUG_TTY=/dev/ttyAMA0
 
 start() {
 	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
 		echo "motion_logger: already running"
 		return 1
 	fi
-	"$DAEMON" &
-	echo $! > "$PIDFILE"
+	if [ -w "$DEBUG_TTY" ]; then
+		# вивід програми й стан запуску дублюємо на DBG1, щоб бачити їх без JST-шнурка
+		"$DAEMON" > "$DEBUG_TTY" 2>&1 &
+		echo $! > "$PIDFILE"
+		echo "motion_logger: started (output on $DEBUG_TTY)" > "$DEBUG_TTY"
+	else
+		"$DAEMON" &
+		echo $! > "$PIDFILE"
+	fi
 	echo "motion_logger: started"
 }
 
