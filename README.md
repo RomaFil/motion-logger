@@ -23,6 +23,8 @@
     make                                   # на цьому комп'ютері
     make CROSS_COMPILE=aarch64-linux-gnu-  # для Raspberry Pi 5
     make STATIC=1                          # статична збірка (не залежить від libc на цілі)
+    make test                              # тести кільцевого буфера (лише на цьому комп'ютері)
+    make format-check CLANG_FORMAT=~/.venvs/clang23/bin/clang-format   # перевірка стилю
     make help
 
 ## Збірка образу
