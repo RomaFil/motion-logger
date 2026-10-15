@@ -1,0 +1,8 @@
+# Налаштування прошивки Pi 5 для Motion Logger (власний образ Buildroot)
+kernel=Image
+disable_overscan=1
+
+# UART на GPIO14/15 (DBG1 на платі): ttyAMA0 для getty і лог самої прошивки на тих самих пінах.
+# Повідомлення ЯДРА сюди не йдуть (драйвер pl011-axi не дає консоль ядра): їх видно лише на JST-роз'ємі (ttyAMA10).
+enable_uart=1
+enable_rp1_uart=1

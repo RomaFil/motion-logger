@@ -12,7 +12,7 @@
 |---|---|
 | `app/` | код застосунку (`core/`, `drivers/`, `interfaces/`, `tests/`) і його `Makefile` |
 | `package/motion_logger/` | рецепт Buildroot для застосунку |
-| `configs/` | defconfig образу (`motion_logger_defconfig`, додається в кроці 4.2) |
+| `configs/` | defconfig образу: `motion_logger_defconfig` (`savedefconfig` від `raspberrypi5_defconfig` + наші зміни) |
 | `board/motion_logger/` | файли плати: `rootfs_overlay/` (скрипт автозапуску), фрагменти ядра й BusyBox, DTS |
 | `docs/` | документація, boot-логи (`docs/bootlogs/`) |
 | `external.desc`, `external.mk`, `Config.in` | опис external-дерева (ім'я `MOTION_LOGGER`) |
@@ -31,11 +31,11 @@
 
     git clone --branch 2026.08 https://gitlab.com/buildroot.org/buildroot.git
     cd buildroot
-    make O=../build-pi5 BR2_EXTERNAL=/шлях/до/цього/репозиторію raspberrypi5_defconfig
+    make O=../build-pi5 BR2_EXTERNAL=/шлях/до/цього/репозиторію motion_logger_defconfig
     cd ../build-pi5 && make
 
 Образ: `build-pi5/images/sdcard.img`.
 
 ## Статус
 
-Каркас (крок 2.1). Далі: кільцевий буфер, потоки, epoll, читання датчиків, власний образ.
+Каркас (крок 2.1) і власний образ, що завантажується на Pi 5 (консоль на GPIO14, getty, dropbear). Далі: кільцевий буфер, потоки, epoll, читання датчиків.
