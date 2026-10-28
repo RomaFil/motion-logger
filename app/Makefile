@@ -32,7 +32,7 @@ ifeq ($(STATIC),1)
 endif
 
 TARGET := $(BUILD)/motion_logger
-SRCS := core/main.c core/ring_buffer.c core/sample_reader.c
+SRCS := core/main.c core/ring_buffer.c core/sample_reader.c core/log_writer.c core/io_util.c
 OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
 # Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
@@ -40,9 +40,10 @@ SIM_TARGET := $(BUILD)/sensor_sim
 SIM_OBJS := $(BUILD)/tools/sensor_sim.o $(BUILD)/core/io_util.o
 
 # Тести: окремі програми з тих самих core-файлів (без main.c), запускаються командою make test.
-TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader
+TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/test_log_writer
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
-	$(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o
+	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
+	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
@@ -72,6 +73,10 @@ $(BUILD)/test_sample_reader: $(BUILD)/tests/test_sample_reader.o $(BUILD)/core/s
 		$(BUILD)/core/ring_buffer.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+$(BUILD)/test_log_writer: $(BUILD)/tests/test_log_writer.o $(BUILD)/core/log_writer.o \
+		$(BUILD)/core/io_util.o $(BUILD)/core/ring_buffer.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test: $(TEST_TARGETS)
 	@for test_program in $(TEST_TARGETS); do ./$$test_program || exit 1; done
 
@@ -89,6 +94,12 @@ $(BUILD)/test_sample_reader_tsan: tests/test_sample_reader.c tests/check.h core/
 		core/sample_reader.h core/ring_buffer.c core/ring_buffer.h
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_sample_reader.c core/sample_reader.c core/ring_buffer.c
+
+$(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_writer.c \
+		core/log_writer.h core/io_util.c core/io_util.h core/ring_buffer.c core/ring_buffer.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_log_writer.c core/log_writer.c core/io_util.c \
+		core/ring_buffer.c
 
 test-tsan: $(TSAN_TARGETS)
 	@for test_program in $(TSAN_TARGETS); do ./$$test_program || exit 1; done
