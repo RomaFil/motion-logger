@@ -26,6 +26,11 @@ BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_MOTION_LOGGER_PATH)/board/motion_logger/config.txt"
 BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_MOTION_LOGGER_PATH)/board/motion_logger/cmdline.txt"
 BR2_PACKAGE_DROPBEAR=y
+# Діагностичні утиліти (i2cdetect, gpiodetect, gpioinfo); лише для навчального образу: викладач 22.10.2026 радив
+# прибрати їх із продуктового (крок G0 трекера)
+BR2_PACKAGE_I2C_TOOLS=y
+BR2_PACKAGE_LIBGPIOD=y
+BR2_PACKAGE_LIBGPIOD_TOOLS=y
 BR2_PACKAGE_KMOD=y
 BR2_PACKAGE_KMOD_TOOLS=y
 BR2_TARGET_ROOTFS_EXT2=y

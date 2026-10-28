@@ -6,3 +6,9 @@ disable_overscan=1
 # Повідомлення ЯДРА сюди не йдуть (драйвер pl011-axi не дає консоль ядра): їх видно лише на JST-роз'ємі (ttyAMA10).
 enable_uart=1
 enable_rp1_uart=1
+
+# I2C1 (GPIO2/3) для MPU6050 і SPI0 (GPIO7-11) для ADXL345: без цих рядків вузли в device tree лишаються
+# disabled і /dev/i2c-1, /dev/spidev0.0 не з'являться. Драйвери зібрано модулями, їх вантажить
+# S11modules зі списку /etc/modules-load.d/motion_logger.conf.
+dtparam=i2c_arm=on
+dtparam=spi=on
