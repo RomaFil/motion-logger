@@ -19,7 +19,14 @@
 
 1. Запиши на платі хвилину спокою і хвилину ходьби: числа акселерометра **в g** у `accel_sample.csv`
    у форматі вище (перший стовпець: мілісекунди від початку запису), GPS-рядки як є в `gps_sample.nmea`.
-2. Перепиши `ground_truth.txt` за тим, що робив: наприклад `0 60 still` і `60 120 walking`.
+   Найпростіше скриптом (картка Pi OS, `sudo apt install python3-smbus2`, GY-87 на I2C1, GPS на `uart2-pi5`):
+
+       python3 scripts/record_accel.py --out app/tests/data --phases still:60,walking:60 --gps /dev/ttyAMA2
+
+   Скрипт підказує фази («лежить», «ходьба»), пише `accel_sample.csv` (100 Гц), `gps_sample.nmea` і
+   `ground_truth.txt`. Сухий прогін без плати: додай `--fake` (дані синтетичні, у файлах позначено).
+   GPS з цього екземпляра дає хибну позицію (підміна сигналу, див. нотатки), тож перевіряється лише розбір рядків.
+2. Якщо писав вручну, перепиши `ground_truth.txt` за тим, що робив: наприклад `0 60 still` і `60 120 walking`.
 3. `make update-sample-report` перегенерує `expected_report.txt`, потім `make check-samples`.
 4. Підбери поріг і вікно: `./build/analyze_recording -w 10 -t 0.05 -c 50 tests/data/accel_sample.csv`
    (`-w` розмір вікна, `-t` поріг у g, `-c` скільки відліків підряд підтверджують зміну стану).
