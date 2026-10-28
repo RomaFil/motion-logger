@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "check.h"
 #include "ring_buffer.h"
 
 #define TEN_ITEMS 10
@@ -33,18 +34,6 @@
 
 /* Скільки перевірок не пройшло. main повертає це як код виходу. */
 static int failures;
-
-/*
- * Перевіряє умову. Якщо вона хибна, друкує файл, рядок і сам вираз та рахує помилку.
- * Тест після цього не зупиняється: так за один запуск видно всі проблеми.
- */
-#define CHECK(condition)                                                                           \
-	do {                                                                                       \
-		if (!(condition)) {                                                                \
-			printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition);                \
-			failures++;                                                                \
-		}                                                                                  \
-	} while (0)
 
 /* Забирає одне число і перевіряє, що операція вдалась і число таке, як очікували. */
 static void check_pop_equals(struct ring_buffer *rb, int32_t expected)
