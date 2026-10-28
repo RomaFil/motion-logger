@@ -10,6 +10,8 @@
 #include <sys/epoll.h>
 #include <unistd.h>
 
+#include "io_util.h"
+
 /* Як часто прокидаємось перевірити прапорець зупинки, якщо даних нема. */
 #define POLL_TIMEOUT_MS 100
 
@@ -149,11 +151,14 @@ static int read_available(int source_fd, struct ring_buffer *rb, struct partial_
 	return STEP_MORE_DATA_EXPECTED;
 }
 
-/* Кладе число в буфер; якщо місця нема, лише рахує втрату. */
+/* Пакує число в запис із міткою часу й кладе в буфер; якщо місця нема, лише рахує втрату. */
 static void store_sample(struct ring_buffer *rb, int32_t value, struct sample_reader_stats *stats)
 {
+	struct sample item = {
+	    .source = SAMPLE_SOURCE_SIM, .time_ms = monotonic_ms(), .value = value};
+
 	stats->received++;
-	if (ring_buffer_push(rb, value) != 0) {
+	if (ring_buffer_push(rb, &item) != 0) {
 		stats->dropped++;
 	}
 }

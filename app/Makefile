@@ -45,7 +45,7 @@ ifeq ($(STATIC),1)
 endif
 
 TARGET := $(BUILD)/motion_logger
-SRCS := core/main.c core/ring_buffer.c core/sample_reader.c core/log_writer.c core/io_util.c
+SRCS := main.c core/ring_buffer.c core/sample_reader.c core/log_writer.c core/io_util.c
 OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
 # Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
@@ -76,7 +76,7 @@ DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
 # Форматер: версія зафіксована в .clang-format (23.1.1). Інша команда: make format-check CLANG_FORMAT=...
 CLANG_FORMAT ?= clang-format
-FORMAT_FILES := $(wildcard core/*.c core/*.h tests/*.c tests/*.h tools/*.c)
+FORMAT_FILES := $(wildcard main.c core/*.c core/*.h interfaces/*.h tests/*.c tests/*.h tools/*.c)
 
 all: $(TARGET) $(SIM_TARGET)
 
@@ -97,7 +97,7 @@ $(BUILD)/test_ring_buffer: $(BUILD)/tests/test_ring_buffer.o $(BUILD)/core/ring_
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_sample_reader: $(BUILD)/tests/test_sample_reader.o $(BUILD)/core/sample_reader.o \
-		$(BUILD)/core/ring_buffer.o
+		$(BUILD)/core/ring_buffer.o $(BUILD)/core/io_util.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_log_writer: $(BUILD)/tests/test_log_writer.o $(BUILD)/core/log_writer.o \
@@ -141,7 +141,7 @@ test: $(TEST_TARGETS) check-samples
 
 # Те саме, але з перевіркою гонок даних (ThreadSanitizer): очікуємо 0 попереджень.
 TSAN_FLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -g -O1 -fsanitize=thread \
-	-pthread -Icore -Itests
+	-pthread -Iinterfaces -Icore -Itests
 TSAN_TARGETS := $(addsuffix _tsan,$(TEST_TARGETS))
 
 $(BUILD)/test_ring_buffer_tsan: tests/test_ring_buffer.c tests/check.h core/ring_buffer.c \
@@ -150,9 +150,10 @@ $(BUILD)/test_ring_buffer_tsan: tests/test_ring_buffer.c tests/check.h core/ring
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_ring_buffer.c core/ring_buffer.c
 
 $(BUILD)/test_sample_reader_tsan: tests/test_sample_reader.c tests/check.h core/sample_reader.c \
-		core/sample_reader.h core/ring_buffer.c core/ring_buffer.h
+		core/sample_reader.h core/ring_buffer.c core/ring_buffer.h core/io_util.c core/io_util.h
 	@mkdir -p $(@D)
-	$(CC) $(TSAN_FLAGS) -o $@ tests/test_sample_reader.c core/sample_reader.c core/ring_buffer.c
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_sample_reader.c core/sample_reader.c core/ring_buffer.c \
+		core/io_util.c
 
 $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_writer.c \
 		core/log_writer.h core/io_util.c core/io_util.h core/ring_buffer.c core/ring_buffer.h

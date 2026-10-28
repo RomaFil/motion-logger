@@ -18,12 +18,14 @@
 #include "check.h"
 #include "log_writer.h"
 #include "ring_buffer.h"
+#include "sample_util.h"
 
 #define SMALL_CAPACITY 8
 #define PREFILLED_SAMPLES 1000
 #define STREAMED_SAMPLES 100000
 #define STREAM_CAPACITY 64
 #define TEMP_PATH_SIZE 32
+#define SAMPLE_TIME_MS 987654
 
 /* Скільки перевірок не пройшло. main повертає це як код виходу. */
 static int failures;
@@ -44,7 +46,7 @@ static void make_temp_path(char *path)
 
 /*
  * Читає лог рядок за рядком і перевіряє: кожен рядок повний і має формат запису з джерелом
- * "test"; значення йдуть 0, 1, 2, ...; мітки часу не спадають. Повертає кількість рядків.
+ * "sim"; значення йдуть 0, 1, 2, ...; мітки часу не спадають. Повертає кількість рядків.
  */
 static size_t check_log_file(const char *path, size_t expected_lines)
 {
@@ -64,7 +66,7 @@ static size_t check_log_file(const char *path, size_t expected_lines)
 		size_t length = strlen(line);
 
 		CHECK(length > 0 && line[length - 1] == '\n');
-		CHECK(sscanf(line, "{\"t_ms\":%lld,\"src\":\"test\",\"value\":%d}", &time_ms,
+		CHECK(sscanf(line, "{\"t_ms\":%lld,\"src\":\"sim\",\"value\":%d}", &time_ms,
 			     &value) == 2);
 		CHECK(value == (int)lines);
 		CHECK(time_ms >= previous_time);
@@ -101,16 +103,15 @@ static void test_format_line_rejects_bad_input(void)
 
 static void test_start_rejects_bad_arguments(void)
 {
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
 
-	CHECK(log_writer_start(NULL, &rb, "test", "/tmp/x") == -EINVAL);
-	CHECK(log_writer_start(&lw, NULL, "test", "/tmp/x") == -EINVAL);
-	CHECK(log_writer_start(&lw, &rb, "BAD NAME", "/tmp/x") == -EINVAL);
-	CHECK(log_writer_start(&lw, &rb, "test", NULL) == -EINVAL);
+	CHECK(log_writer_start(NULL, &rb, "/tmp/x") == -EINVAL);
+	CHECK(log_writer_start(&lw, NULL, "/tmp/x") == -EINVAL);
+	CHECK(log_writer_start(&lw, &rb, NULL) == -EINVAL);
 	CHECK(log_writer_stop(NULL, NULL) == -EINVAL);
 
 	ring_buffer_destroy(&rb);
@@ -118,13 +119,13 @@ static void test_start_rejects_bad_arguments(void)
 
 static void test_start_reports_unwritable_path(void)
 {
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
 
-	CHECK(log_writer_start(&lw, &rb, "test", "/no_such_dir/log.jsonl") == -ENOENT);
+	CHECK(log_writer_start(&lw, &rb, "/no_such_dir/log.jsonl") == -ENOENT);
 
 	ring_buffer_destroy(&rb);
 }
@@ -132,7 +133,7 @@ static void test_start_reports_unwritable_path(void)
 /* Числа лежать у буфері ще до старту: stop має дописати всі до одного й у тому ж порядку. */
 static void test_stop_drains_prefilled_buffer(void)
 {
-	static int32_t storage[PREFILLED_SAMPLES];
+	static struct sample storage[PREFILLED_SAMPLES];
 	struct ring_buffer rb;
 	struct log_writer lw;
 	struct log_writer_stats stats;
@@ -142,10 +143,10 @@ static void test_stop_drains_prefilled_buffer(void)
 	make_temp_path(path);
 	CHECK(ring_buffer_init(&rb, storage, PREFILLED_SAMPLES) == 0);
 	for (i = 0; i < PREFILLED_SAMPLES; i++) {
-		CHECK(ring_buffer_push(&rb, i) == 0);
+		CHECK(push_value(&rb, i) == 0);
 	}
 
-	CHECK(log_writer_start(&lw, &rb, "test", path) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
 	CHECK(log_writer_stop(&lw, &stats) == 0);
 
 	CHECK(stats.written == PREFILLED_SAMPLES);
@@ -164,7 +165,7 @@ static void *push_sequence(void *argument)
 	int32_t i;
 
 	for (i = 0; i < STREAMED_SAMPLES; i++) {
-		while (ring_buffer_push(rb, i) != 0) {
+		while (push_value(rb, i) != 0) {
 			sched_yield(); /* буфер повний: даємо записувачу забрати числа */
 		}
 	}
@@ -174,7 +175,7 @@ static void *push_sequence(void *argument)
 
 static void test_concurrent_producer_loses_nothing(void)
 {
-	int32_t storage[STREAM_CAPACITY];
+	struct sample storage[STREAM_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 	struct log_writer_stats stats;
@@ -183,7 +184,7 @@ static void test_concurrent_producer_loses_nothing(void)
 
 	make_temp_path(path);
 	CHECK(ring_buffer_init(&rb, storage, STREAM_CAPACITY) == 0);
-	CHECK(log_writer_start(&lw, &rb, "test", path) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
 	CHECK(pthread_create(&producer, NULL, push_sequence, &rb) == 0);
 
 	pthread_join(producer, NULL);
@@ -200,7 +201,7 @@ static void test_concurrent_producer_loses_nothing(void)
 /* Повторний запуск дописує в кінець наявного файлу, а не затирає його. */
 static void test_second_run_appends_to_existing_file(void)
 {
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 	char path[TEMP_PATH_SIZE];
@@ -212,13 +213,44 @@ static void test_second_run_appends_to_existing_file(void)
 
 	for (run = 0; run < 2; run++) {
 		for (i = 0; i < 3; i++) {
-			CHECK(ring_buffer_push(&rb, run * 3 + i) == 0);
+			CHECK(push_value(&rb, run * 3 + i) == 0);
 		}
-		CHECK(log_writer_start(&lw, &rb, "test", path) == 0);
+		CHECK(log_writer_start(&lw, &rb, path) == 0);
 		CHECK(log_writer_stop(&lw, NULL) == 0);
 	}
 
 	check_log_file(path, 6);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Число імітатора потрапляє в лог із тією міткою часу, з якою воно прийшло, а не з часом запису. */
+static void test_sim_sample_keeps_its_own_timestamp(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct sample item = make_sim_sample(42);
+	char path[TEMP_PATH_SIZE];
+	char line[LOG_WRITER_LINE_SIZE];
+	FILE *file;
+
+	item.time_ms = SAMPLE_TIME_MS;
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, NULL) == 0);
+
+	file = fopen(path, "r");
+	CHECK(file != NULL);
+	if (file != NULL) {
+		CHECK(fgets(line, sizeof(line), file) != NULL);
+		CHECK(strcmp(line, "{\"t_ms\":987654,\"src\":\"sim\",\"value\":42}\n") == 0);
+		fclose(file);
+	}
 
 	ring_buffer_destroy(&rb);
 	unlink(path);
@@ -233,6 +265,7 @@ int main(void)
 	test_stop_drains_prefilled_buffer();
 	test_concurrent_producer_loses_nothing();
 	test_second_run_appends_to_existing_file();
+	test_sim_sample_keeps_its_own_timestamp();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);

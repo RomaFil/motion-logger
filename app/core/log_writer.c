@@ -14,20 +14,24 @@
 #include <unistd.h>
 
 #include "io_util.h"
+#include "sensor.h"
 
 /* Як довго потік спить, коли в буфері порожньо. 10 мс = не більше ~100 прокидань на секунду. */
 #define IDLE_SLEEP_MS 10
 
-#define MSEC_PER_SEC 1000
 #define NSEC_PER_MSEC 1000000L
+
+/* Ім'я джерела в рядках логу. Лише a-z, 0-9, _: воно йде в JSON без екранування. */
+#define SIM_SOURCE_NAME "sim"
 
 #define LOG_FILE_MODE 0644
 
 /* Приватні функції описано тут, а визначено внизу: публічні функції йдуть першими. */
 static bool is_valid_source(const char *source);
 static void *run_writer_thread(void *argument);
-static void write_sample(struct log_writer *lw, int32_t value);
-static int64_t read_monotonic_ms(void);
+static void handle_sample(struct log_writer *lw, const struct sample *item);
+static void write_sim_sample(struct log_writer *lw, const struct sample *item);
+static void write_line(struct log_writer *lw, const char *line, int length);
 static void sleep_idle(void);
 
 int log_writer_format_line(char *out, size_t size, const char *source, int64_t timestamp_ms,
@@ -49,12 +53,11 @@ int log_writer_format_line(char *out, size_t size, const char *source, int64_t t
 	return length;
 }
 
-int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *source,
-		     const char *path)
+int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path)
 {
 	int error;
 
-	if (lw == NULL || rb == NULL || path == NULL || !is_valid_source(source)) {
+	if (lw == NULL || rb == NULL || path == NULL) {
 		return -EINVAL;
 	}
 
@@ -64,7 +67,6 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 	}
 
 	lw->source_buffer = rb;
-	strcpy(lw->source, source); /* довжину перевірено в is_valid_source */
 	memset(&lw->stats, 0, sizeof(lw->stats));
 	atomic_init(&lw->stop_requested, false);
 
@@ -129,18 +131,18 @@ static bool is_valid_source(const char *source)
 static void *run_writer_thread(void *argument)
 {
 	struct log_writer *lw = argument;
-	int32_t value;
+	struct sample item;
 
 	for (;;) {
 		/*
-		 * Прапорець читаємо ДО спроби забрати число. Якщо зупинку вже запросили, виробники
+		 * Прапорець читаємо ДО спроби забрати запис. Якщо зупинку вже запросили, виробники
 		 * закінчили, і порожній буфер означає, що справді все дописано. Якби читали після
-		 * pop, число, покладене між pop і перевіркою, лишилось би в буфері.
+		 * pop, запис, покладений між pop і перевіркою, лишився б у буфері.
 		 */
 		bool stopping = atomic_load(&lw->stop_requested);
 
-		if (ring_buffer_pop(lw->source_buffer, &value) == 0) {
-			write_sample(lw, value);
+		if (ring_buffer_pop(lw->source_buffer, &item) == 0) {
+			handle_sample(lw, &item);
 			continue;
 		}
 		if (stopping) {
@@ -152,28 +154,39 @@ static void *run_writer_thread(void *argument)
 	return NULL;
 }
 
-/* Формує рядок і записує його одним викликом; результат рахує в статистиці. */
-static void write_sample(struct log_writer *lw, int32_t value)
+/* Розподіляє запис за джерелом: число імітатора пишемо одразу, відлік акселерометра йде у фільтр.
+ */
+static void handle_sample(struct log_writer *lw, const struct sample *item)
+{
+	switch (item->source) {
+	case SAMPLE_SOURCE_SIM:
+		write_sim_sample(lw, item);
+		break;
+	default:
+		lw->stats.failed++;
+		break;
+	}
+}
+
+/* Число імітатора: один рядок на число. */
+static void write_sim_sample(struct log_writer *lw, const struct sample *item)
 {
 	char line[LOG_WRITER_LINE_SIZE];
 	int length =
-	    log_writer_format_line(line, sizeof(line), lw->source, read_monotonic_ms(), value);
+	    log_writer_format_line(line, sizeof(line), SIM_SOURCE_NAME, item->time_ms, item->value);
 
+	write_line(lw, line, length);
+}
+
+/* Записує готовий рядок одним викликом (length < 0 це помилка форматування); рахує результат. */
+static void write_line(struct log_writer *lw, const char *line, int length)
+{
 	if (length < 0 || write_all(lw->fd, line, (size_t)length) < 0) {
 		lw->stats.failed++;
 		return;
 	}
 
 	lw->stats.written++;
-}
-
-static int64_t read_monotonic_ms(void)
-{
-	struct timespec now;
-
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	return (int64_t)now.tv_sec * MSEC_PER_SEC + now.tv_nsec / NSEC_PER_MSEC;
 }
 
 static void sleep_idle(void)

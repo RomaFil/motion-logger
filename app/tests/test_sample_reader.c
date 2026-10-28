@@ -13,8 +13,10 @@
 #include <unistd.h>
 
 #include "check.h"
+#include "io_util.h"
 #include "ring_buffer.h"
 #include "sample_reader.h"
+#include "sample_util.h"
 
 #define MANY_SAMPLES 1000
 #define DRIBBLE_SAMPLES 200
@@ -88,16 +90,23 @@ static int run_reader_against_writer(struct ring_buffer *rb, size_t num_samples,
 	return result;
 }
 
-/* Забирає з буфера num_samples чисел і перевіряє, що це 0, 1, 2, ... без пропусків. */
+/*
+ * Забирає з буфера num_samples записів і перевіряє, що числа 0, 1, 2, ... без пропусків, а мітки
+ * часу не спадають.
+ */
 static void check_buffer_holds_sequence(struct ring_buffer *rb, size_t num_samples)
 {
+	int64_t previous_time_ms = 0;
 	size_t i;
 
 	for (i = 0; i < num_samples; i++) {
-		int32_t value = -1;
+		struct sample item = make_sim_sample(-1);
 
-		CHECK(ring_buffer_pop(rb, &value) == 0);
-		CHECK(value == (int32_t)i);
+		CHECK(ring_buffer_pop(rb, &item) == 0);
+		CHECK(item.source == SAMPLE_SOURCE_SIM);
+		CHECK(item.value == (int32_t)i);
+		CHECK(item.time_ms >= previous_time_ms);
+		previous_time_ms = item.time_ms;
 	}
 	CHECK(ring_buffer_is_empty(rb));
 }
@@ -105,7 +114,7 @@ static void check_buffer_holds_sequence(struct ring_buffer *rb, size_t num_sampl
 static void test_run_rejects_bad_arguments(void)
 {
 	static volatile sig_atomic_t never_stop;
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct sample_reader_stats stats;
 
@@ -121,7 +130,7 @@ static void test_run_rejects_bad_arguments(void)
 
 static void test_all_samples_arrive_in_order(void)
 {
-	int32_t storage[MANY_SAMPLES];
+	struct sample storage[MANY_SAMPLES];
 	struct ring_buffer rb;
 	struct sample_reader_stats stats;
 
@@ -138,7 +147,7 @@ static void test_all_samples_arrive_in_order(void)
 /* Писар віддає по 1 байту: кожне число приходить розірваним на чотири частини. */
 static void test_samples_split_across_reads_are_reassembled(void)
 {
-	int32_t storage[DRIBBLE_SAMPLES];
+	struct sample storage[DRIBBLE_SAMPLES];
 	struct ring_buffer rb;
 	struct sample_reader_stats stats;
 
@@ -154,7 +163,7 @@ static void test_samples_split_across_reads_are_reassembled(void)
 
 static void test_full_buffer_counts_dropped_and_keeps_oldest(void)
 {
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct sample_reader_stats stats;
 
@@ -172,7 +181,7 @@ static void test_full_buffer_counts_dropped_and_keeps_oldest(void)
 static void test_stop_flag_ends_reader_while_source_is_open(void)
 {
 	static volatile sig_atomic_t already_stopped = 1;
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct sample_reader_stats stats;
 	int pipe_fds[2];
@@ -188,6 +197,32 @@ static void test_stop_flag_ends_reader_while_source_is_open(void)
 	ring_buffer_destroy(&rb);
 }
 
+/* Кожне число отримує мітку часу в момент читання: між «до запуску читача» і «після». */
+static void test_samples_are_stamped_with_current_time(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct sample_reader_stats stats;
+	int64_t before_ms;
+	int64_t after_ms;
+	size_t i;
+
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+
+	before_ms = monotonic_ms();
+	CHECK(run_reader_against_writer(&rb, SMALL_CAPACITY, sizeof(int32_t), &stats) == 0);
+	after_ms = monotonic_ms();
+
+	for (i = 0; i < SMALL_CAPACITY; i++) {
+		struct sample item;
+
+		CHECK(ring_buffer_pop(&rb, &item) == 0);
+		CHECK(item.time_ms >= before_ms && item.time_ms <= after_ms);
+	}
+
+	ring_buffer_destroy(&rb);
+}
+
 int main(void)
 {
 	test_run_rejects_bad_arguments();
@@ -195,6 +230,7 @@ int main(void)
 	test_samples_split_across_reads_are_reassembled();
 	test_full_buffer_counts_dropped_and_keeps_oldest();
 	test_stop_flag_ends_reader_while_source_is_open();
+	test_samples_are_stamped_with_current_time();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);

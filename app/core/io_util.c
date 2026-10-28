@@ -5,7 +5,11 @@
 #include "io_util.h"
 
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
+
+#define MSEC_PER_SEC 1000
+#define NSEC_PER_MSEC 1000000L
 
 int write_all(int fd, const void *data, size_t length)
 {
@@ -25,4 +29,13 @@ int write_all(int fd, const void *data, size_t length)
 	}
 
 	return 0;
+}
+
+int64_t monotonic_ms(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	return (int64_t)now.tv_sec * MSEC_PER_SEC + now.tv_nsec / NSEC_PER_MSEC;
 }

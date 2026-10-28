@@ -17,7 +17,7 @@ static size_t next_index(size_t index, size_t capacity);
 static bool is_empty_locked(const struct ring_buffer *rb);
 static bool is_full_locked(const struct ring_buffer *rb);
 
-int ring_buffer_init(struct ring_buffer *rb, int32_t *storage, size_t capacity)
+int ring_buffer_init(struct ring_buffer *rb, struct sample *storage, size_t capacity)
 {
 	int error;
 
@@ -48,11 +48,11 @@ void ring_buffer_destroy(struct ring_buffer *rb)
 	pthread_mutex_destroy(&rb->lock);
 }
 
-int ring_buffer_push(struct ring_buffer *rb, int32_t value)
+int ring_buffer_push(struct ring_buffer *rb, const struct sample *item)
 {
 	int result = 0;
 
-	if (rb == NULL) {
+	if (rb == NULL || item == NULL) {
 		return -EINVAL;
 	}
 
@@ -61,7 +61,7 @@ int ring_buffer_push(struct ring_buffer *rb, int32_t value)
 		/* Старі дані не затираємо: помилку бачить той, хто викликав. */
 		result = -ENOSPC;
 	} else {
-		rb->items[rb->head] = value;
+		rb->items[rb->head] = *item;
 		rb->head = next_index(rb->head, rb->capacity);
 		rb->count++;
 	}
@@ -70,11 +70,11 @@ int ring_buffer_push(struct ring_buffer *rb, int32_t value)
 	return result;
 }
 
-int ring_buffer_pop(struct ring_buffer *rb, int32_t *value)
+int ring_buffer_pop(struct ring_buffer *rb, struct sample *item)
 {
 	int result = 0;
 
-	if (rb == NULL || value == NULL) {
+	if (rb == NULL || item == NULL) {
 		return -EINVAL;
 	}
 
@@ -82,7 +82,7 @@ int ring_buffer_pop(struct ring_buffer *rb, int32_t *value)
 	if (is_empty_locked(rb)) {
 		result = -ENODATA;
 	} else {
-		*value = rb->items[rb->tail];
+		*item = rb->items[rb->tail];
 		rb->tail = next_index(rb->tail, rb->capacity);
 		rb->count--;
 	}

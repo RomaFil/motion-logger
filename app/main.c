@@ -25,9 +25,6 @@
 #define STDIN_OPTION "--stdin"
 #define LOG_OPTION "--log"
 
-/* Ім'я джерела в кожному рядку логу; з'являться справжні датчики, і воно стане різним. */
-#define SOURCE_NAME "sim"
-
 /* Параметри запуску, розібрані з командного рядка. */
 struct options {
 	bool read_stdin;
@@ -43,7 +40,7 @@ static int install_stop_handlers(void);
 
 int main(int argc, char **argv)
 {
-	static int32_t storage[BUFFER_CAPACITY];
+	static struct sample storage[BUFFER_CAPACITY];
 	struct ring_buffer buffer;
 	struct sample_reader_stats read_stats;
 	struct log_writer_stats log_stats = {0};
@@ -74,7 +71,7 @@ int main(int argc, char **argv)
 	}
 
 	if (options.log_path != NULL) {
-		result = log_writer_start(&writer, &buffer, SOURCE_NAME, options.log_path);
+		result = log_writer_start(&writer, &buffer, options.log_path);
 		if (result < 0) {
 			fprintf(stderr, "motion_logger: log %s: %s\n", options.log_path,
 				strerror(-result));

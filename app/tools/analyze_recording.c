@@ -22,13 +22,14 @@
 #include <unistd.h>
 
 #include "accel_csv.h"
+#include "motion_defaults.h"
 #include "motion_report.h"
 #include "nmea.h"
 #include "nmea_parser.h"
 
-#define DEFAULT_WINDOW 10
-#define DEFAULT_THRESHOLD_G 0.05
-#define DEFAULT_CONFIRM 50
+#define DEFAULT_WINDOW MOTION_DEFAULT_WINDOW
+#define DEFAULT_THRESHOLD_G MOTION_DEFAULT_THRESHOLD_G
+#define DEFAULT_CONFIRM MOTION_DEFAULT_CONFIRM
 #define NMEA_LINE_SIZE 128
 #define MSEC_PER_SEC 1000
 #define MAX_EVENTS 256

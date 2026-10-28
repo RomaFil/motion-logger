@@ -15,6 +15,7 @@
 
 #include "check.h"
 #include "ring_buffer.h"
+#include "sample_util.h"
 
 #define TEN_ITEMS 10
 #define SMALL_CAPACITY 3
@@ -38,28 +39,29 @@ static int failures;
 /* Забирає одне число і перевіряє, що операція вдалась і число таке, як очікували. */
 static void check_pop_equals(struct ring_buffer *rb, int32_t expected)
 {
-	int32_t value = 0;
+	struct sample item = {0};
 
-	CHECK(ring_buffer_pop(rb, &value) == 0);
-	CHECK(value == expected);
+	CHECK(ring_buffer_pop(rb, &item) == 0);
+	CHECK(item.value == expected);
 }
 
 static void test_init_rejects_bad_arguments(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 
 	CHECK(ring_buffer_init(NULL, storage, SMALL_CAPACITY) == -EINVAL);
 	CHECK(ring_buffer_init(&rb, NULL, SMALL_CAPACITY) == -EINVAL);
 	CHECK(ring_buffer_init(&rb, storage, 0) == -EINVAL);
-	CHECK(ring_buffer_push(NULL, 1) == -EINVAL);
-	CHECK(ring_buffer_pop(NULL, &(int32_t){0}) == -EINVAL);
+	CHECK(push_value(NULL, 1) == -EINVAL);
+	CHECK(ring_buffer_pop(NULL, &(struct sample){0}) == -EINVAL);
+	CHECK(ring_buffer_push(&rb, NULL) == -EINVAL);
 }
 
 static void test_new_buffer_is_empty(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
 	CHECK(ring_buffer_is_empty(&rb));
@@ -71,12 +73,12 @@ static void test_new_buffer_is_empty(void)
 static void test_pop_from_empty_returns_nodata(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[SMALL_CAPACITY];
-	int32_t value = UNTOUCHED;
+	struct sample storage[SMALL_CAPACITY];
+	struct sample item = {.value = UNTOUCHED};
 
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
-	CHECK(ring_buffer_pop(&rb, &value) == -ENODATA);
-	CHECK(value == UNTOUCHED);
+	CHECK(ring_buffer_pop(&rb, &item) == -ENODATA);
+	CHECK(item.value == UNTOUCHED);
 	ring_buffer_destroy(&rb);
 }
 
@@ -84,12 +86,12 @@ static void test_pop_from_empty_returns_nodata(void)
 static void test_push_ten_pop_ten_keeps_order(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[TEN_ITEMS];
+	struct sample storage[TEN_ITEMS];
 	int32_t number;
 
 	CHECK(ring_buffer_init(&rb, storage, TEN_ITEMS) == 0);
 	for (number = 0; number < TEN_ITEMS; number++) {
-		CHECK(ring_buffer_push(&rb, number * 10) == 0);
+		CHECK(push_value(&rb, number * 10) == 0);
 	}
 	CHECK(ring_buffer_is_full(&rb));
 	CHECK(ring_buffer_count(&rb) == TEN_ITEMS);
@@ -104,14 +106,14 @@ static void test_push_ten_pop_ten_keeps_order(void)
 static void test_push_into_full_returns_nospc_and_keeps_data(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[SMALL_CAPACITY];
+	struct sample storage[SMALL_CAPACITY];
 
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
-	CHECK(ring_buffer_push(&rb, 1) == 0);
-	CHECK(ring_buffer_push(&rb, 2) == 0);
-	CHECK(ring_buffer_push(&rb, 3) == 0);
+	CHECK(push_value(&rb, 1) == 0);
+	CHECK(push_value(&rb, 2) == 0);
+	CHECK(push_value(&rb, 3) == 0);
 
-	CHECK(ring_buffer_push(&rb, 4) == -ENOSPC);
+	CHECK(push_value(&rb, 4) == -ENOSPC);
 	CHECK(ring_buffer_count(&rb) == SMALL_CAPACITY);
 
 	/* Число 4 не затерло жодне старе число. */
@@ -128,18 +130,18 @@ static void test_push_into_full_returns_nospc_and_keeps_data(void)
 static void test_wrap_around_keeps_order(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[WRAP_CAPACITY];
+	struct sample storage[WRAP_CAPACITY];
 
 	CHECK(ring_buffer_init(&rb, storage, WRAP_CAPACITY) == 0);
-	CHECK(ring_buffer_push(&rb, 1) == 0);
-	CHECK(ring_buffer_push(&rb, 2) == 0);
-	CHECK(ring_buffer_push(&rb, 3) == 0);
+	CHECK(push_value(&rb, 1) == 0);
+	CHECK(push_value(&rb, 2) == 0);
+	CHECK(push_value(&rb, 3) == 0);
 	check_pop_equals(&rb, 1);
 	check_pop_equals(&rb, 2);
 
-	CHECK(ring_buffer_push(&rb, 4) == 0);
-	CHECK(ring_buffer_push(&rb, 5) == 0);
-	CHECK(ring_buffer_push(&rb, 6) == 0);
+	CHECK(push_value(&rb, 4) == 0);
+	CHECK(push_value(&rb, 5) == 0);
+	CHECK(push_value(&rb, 6) == 0);
 	CHECK(ring_buffer_is_full(&rb));
 
 	check_pop_equals(&rb, 3);
@@ -169,10 +171,10 @@ static void *write_numbers(void *argument)
 	int result;
 
 	for (number = 0; number < BIG_COUNT; number++) {
-		result = ring_buffer_push(rb, number);
+		result = push_value(rb, number);
 		while (result == -ENOSPC) {
 			sched_yield();
-			result = ring_buffer_push(rb, number);
+			result = push_value(rb, number);
 		}
 	}
 
@@ -188,21 +190,21 @@ static void *read_numbers(void *argument)
 {
 	struct reader_report *report = argument;
 	int32_t expected;
-	int32_t value;
+	struct sample item;
 	int result;
 
 	report->sum = 0;
 	report->order_ok = true;
 	for (expected = 0; expected < BIG_COUNT; expected++) {
-		result = ring_buffer_pop(report->rb, &value);
+		result = ring_buffer_pop(report->rb, &item);
 		while (result == -ENODATA) {
 			sched_yield();
-			result = ring_buffer_pop(report->rb, &value);
+			result = ring_buffer_pop(report->rb, &item);
 		}
-		if (result != 0 || value != expected) {
+		if (result != 0 || item.value != expected) {
 			report->order_ok = false;
 		}
-		report->sum += value;
+		report->sum += item.value;
 	}
 
 	return NULL;
@@ -212,7 +214,7 @@ static void *read_numbers(void *argument)
 static void run_two_thread_round(void)
 {
 	struct ring_buffer rb;
-	int32_t storage[BIG_CAPACITY];
+	struct sample storage[BIG_CAPACITY];
 	struct reader_report report = {.rb = &rb};
 	pthread_t writer;
 	pthread_t reader;
