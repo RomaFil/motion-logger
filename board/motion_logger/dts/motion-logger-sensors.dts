@@ -1,0 +1,59 @@
+/*
+ * Overlay Motion Logger: описує датчики на платі для драйверів ядра (IIO).
+ *   - I2C1 (GPIO2/3): MPU6050 з модуля GY-87 за адресою 0x68;
+ *   - SPI0, CE0 (GPIO8): ADXL345 з модуля GY-291.
+ * Збирається post-image.sh (dtc -@) у overlays/motion-logger-sensors.dtbo, вмикається рядком
+ * dtoverlay=motion-logger-sensors у config.txt. Мітки i2c1, spi0, spidev0 беруться з __symbols__
+ * базового bcm2712d0-rpi-5-b.dtb.
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	/* MPU6050 на I2C1. Починаємо зі 100 кГц (безпечний старт), 400 кГц лише після перевірки. */
+	fragment@0 {
+		target = <&i2c1>;
+		__overlay__ {
+			status = "okay";
+			clock-frequency = <100000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			accelerometer_mpu6050: imu@68 {
+				compatible = "invensense,mpu6050";
+				reg = <0x68>;
+			};
+		};
+	};
+
+	/*
+	 * ADXL345 на SPI0, CE0. Режим SPI 3 (CPOL=1, CPHA=1): так модуль відповів у кроці 1.4.
+	 * Лінія INT1 не підключена, тому interrupts не задаємо: драйвер працюватиме лише з raw-читанням.
+	 */
+	fragment@1 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			accelerometer_adxl345: accelerometer@0 {
+				compatible = "adi,adxl345";
+				reg = <0>;
+				spi-max-frequency = <5000000>;
+				spi-cpol;
+				spi-cpha;
+			};
+		};
+	};
+
+	/* Базове дерево вже має spidev на CE0; на одному CS не може бути двох власників. */
+	fragment@2 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+};

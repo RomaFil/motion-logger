@@ -12,3 +12,8 @@ enable_rp1_uart=1
 # S11modules зі списку /etc/modules-load.d/motion_logger.conf.
 dtparam=i2c_arm=on
 dtparam=spi=on
+
+# Датчики: власний оверлей board/motion_logger/dts/motion-logger-sensors.dts (MPU6050 на I2C1, ADXL345 на
+# SPI0 CE0, драйвери ядра IIO) і UART2 (GPIO4/5) для GPS. Оверлеї збирає і кладе в образ post-image.sh.
+dtoverlay=motion-logger-sensors
+dtoverlay=uart2-pi5

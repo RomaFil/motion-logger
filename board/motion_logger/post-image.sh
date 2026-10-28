@@ -18,6 +18,25 @@ fi
 mkdir -p "${BINARIES_DIR}/rpi-firmware/overlays"
 cp "${OVL_SRC}" "${BINARIES_DIR}/rpi-firmware/overlays/"
 
+# UART2 (GPIO4/5) для GPS: стандартний оверлей ядра теж лежить лише в каталозі збірки ядра.
+UART2_SRC=$(ls "${BUILD_DIR}"/linux-*/arch/arm/boot/dts/overlays/uart2-pi5.dtbo 2>/dev/null | head -n 1)
+if [ -z "${UART2_SRC}" ]; then
+	echo "post-image: не знайдено uart2-pi5.dtbo у каталозі збірки ядра" >&2
+	exit 1
+fi
+cp "${UART2_SRC}" "${BINARIES_DIR}/rpi-firmware/overlays/"
+
+# Власний оверлей датчиків (MPU6050 на I2C, ADXL345 на SPI): компілюємо dtc із зібраного ядра,
+# ключ -@ лишає символи, потрібні прошивці Pi для застосування оверлея.
+DTC=$(ls "${BUILD_DIR}"/linux-*/scripts/dtc/dtc 2>/dev/null | head -n 1)
+if [ -z "${DTC}" ]; then
+	echo "post-image: не знайдено dtc у каталозі збірки ядра" >&2
+	exit 1
+fi
+"${DTC}" -@ -I dts -O dtb \
+	-o "${BINARIES_DIR}/rpi-firmware/overlays/motion-logger-sensors.dtbo" \
+	"${BOARD_DIR}/dts/motion-logger-sensors.dts"
+
 # Список файлів розділу boot: dtb, усе з rpi-firmware (config.txt, cmdline.txt, overlays) і ядро
 FILES=()
 for i in "${BINARIES_DIR}"/*.dtb "${BINARIES_DIR}"/rpi-firmware/*; do

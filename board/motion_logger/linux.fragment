@@ -1,0 +1,5 @@
+# Доповнення до конфігурації ядра Raspberry Pi (підключається через BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES).
+# ADXL345 по SPI через IIO. Старий input-драйвер вимикаємо: він збігається за тим самим іменем
+# пристрою і міг би зайняти датчик раніше.
+# CONFIG_INPUT_ADXL34X is not set
+CONFIG_ADXL345_SPI=m
