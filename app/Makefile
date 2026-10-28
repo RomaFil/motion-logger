@@ -1,5 +1,5 @@
 # Makefile застосунку motion_logger.
-#   make                                    збірка на цьому комп'ютері
+#   make                                    збірка на цьому комп'ютері (motion_logger і sensor_sim)
 #   make CROSS_COMPILE=aarch64-linux-gnu-   збірка для Raspberry Pi 5
 #   make STATIC=1                           статична збірка (без залежності від libc на цілі)
 #   make DEBUG=1                            з відладочною інформацією
@@ -24,7 +24,7 @@ endif
 # Обов'язкові прапорці дописуємо через override: змінна CFLAGS з командного рядка
 # (так її передає Buildroot) інакше перекрила б наші -std/-Wall/-MMD.
 CFLAGS ?=
-override CFLAGS += -std=c11 -Wall -Wextra $(OPT) -MMD -MP -pthread -Iinterfaces -Icore
+override CFLAGS += -std=c11 -Wall -Wextra $(OPT) -MMD -MP -pthread -D_POSIX_C_SOURCE=200809L -Iinterfaces -Icore
 LDFLAGS ?=
 override LDFLAGS += -pthread
 ifeq ($(STATIC),1)
@@ -32,22 +32,30 @@ ifeq ($(STATIC),1)
 endif
 
 TARGET := $(BUILD)/motion_logger
-SRCS := core/main.c core/ring_buffer.c
+SRCS := core/main.c core/ring_buffer.c core/sample_reader.c
 OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
-# Тести: окрема програма з тих самих core-файлів (без main.c), запускається командою make test.
-TEST_TARGET := $(BUILD)/test_ring_buffer
-TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/core/ring_buffer.o
+# Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
+SIM_TARGET := $(BUILD)/sensor_sim
+SIM_OBJS := $(BUILD)/tools/sensor_sim.o
 
-DEPS := $(OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+# Тести: окремі програми з тих самих core-файлів (без main.c), запускаються командою make test.
+TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader
+TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
+	$(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o
+
+DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
 # Форматер: версія зафіксована в .clang-format (23.1.1). Інша команда: make format-check CLANG_FORMAT=...
 CLANG_FORMAT ?= clang-format
-FORMAT_FILES := $(wildcard core/*.c core/*.h tests/*.c)
+FORMAT_FILES := $(wildcard core/*.c core/*.h tests/*.c tests/*.h tools/*.c)
 
-all: $(TARGET)
+all: $(TARGET) $(SIM_TARGET)
 
 $(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(SIM_TARGET): $(SIM_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/%.o: %.c
@@ -57,21 +65,33 @@ $(BUILD)/%.o: %.c
 # залежності від .h, які записав gcc (-MMD); "-" = не помилка, якщо .d ще нема
 -include $(DEPS)
 
-$(TEST_TARGET): $(TEST_OBJS)
+$(BUILD)/test_ring_buffer: $(BUILD)/tests/test_ring_buffer.o $(BUILD)/core/ring_buffer.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test: $(TEST_TARGET)
-	./$(TEST_TARGET)
+$(BUILD)/test_sample_reader: $(BUILD)/tests/test_sample_reader.o $(BUILD)/core/sample_reader.o \
+		$(BUILD)/core/ring_buffer.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test: $(TEST_TARGETS)
+	@for test_program in $(TEST_TARGETS); do ./$$test_program || exit 1; done
 
 # Те саме, але з перевіркою гонок даних (ThreadSanitizer): очікуємо 0 попереджень.
-TSAN_TARGET := $(BUILD)/test_ring_buffer_tsan
+TSAN_FLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -g -O1 -fsanitize=thread \
+	-pthread -Icore -Itests
+TSAN_TARGETS := $(addsuffix _tsan,$(TEST_TARGETS))
 
-$(TSAN_TARGET): tests/test_ring_buffer.c core/ring_buffer.c core/ring_buffer.h
+$(BUILD)/test_ring_buffer_tsan: tests/test_ring_buffer.c tests/check.h core/ring_buffer.c \
+		core/ring_buffer.h
 	@mkdir -p $(@D)
-	$(CC) -std=c11 -Wall -Wextra -g -O1 -fsanitize=thread -pthread -Icore -o $@ tests/test_ring_buffer.c core/ring_buffer.c
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_ring_buffer.c core/ring_buffer.c
 
-test-tsan: $(TSAN_TARGET)
-	./$(TSAN_TARGET)
+$(BUILD)/test_sample_reader_tsan: tests/test_sample_reader.c tests/check.h core/sample_reader.c \
+		core/sample_reader.h core/ring_buffer.c core/ring_buffer.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_sample_reader.c core/sample_reader.c core/ring_buffer.c
+
+test-tsan: $(TSAN_TARGETS)
+	@for test_program in $(TSAN_TARGETS); do ./$$test_program || exit 1; done
 
 format-check:
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
@@ -83,7 +103,7 @@ clean:
 	rm -rf $(BUILD)
 
 help:
-	@echo "make                                   - зібрати"
+	@echo "make                                   - зібрати motion_logger і sensor_sim"
 	@echo "make CROSS_COMPILE=aarch64-linux-gnu-  - для Raspberry Pi 5"
 	@echo "make STATIC=1                          - статична збірка"
 	@echo "make DEBUG=1                           - з відладкою"
