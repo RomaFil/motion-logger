@@ -1,0 +1,59 @@
+# window=10 threshold_g=0.050 confirm=50
+second moving samples avg_dev_g
+     0 no         100 0.0047
+     1 no         100 0.0045
+     2 no         100 0.0041
+     3 no         100 0.0048
+     4 no         100 0.0049
+     5 no         100 0.0048
+     6 no         100 0.0058
+     7 no         100 0.0049
+     8 no         100 0.0052
+     9 no         100 0.0054
+    10 no         100 0.0055
+    11 no         100 0.0037
+    12 no         100 0.0044
+    13 no         100 0.0046
+    14 no         100 0.0049
+    15 no         100 0.0049
+    16 no         100 0.0052
+    17 no         100 0.0053
+    18 no         100 0.0037
+    19 no         100 0.0049
+    20 yes        100 0.2103
+    21 yes        100 0.2174
+    22 yes        100 0.2176
+    23 yes        100 0.2180
+    24 yes        100 0.2149
+    25 yes        100 0.2190
+    26 yes        100 0.2198
+    27 yes        100 0.2219
+    28 yes        100 0.2206
+    29 yes        100 0.2190
+    30 yes        100 0.2182
+    31 yes        100 0.2225
+    32 yes        100 0.2169
+    33 yes        100 0.2199
+    34 yes        100 0.2189
+    35 yes        100 0.2157
+    36 yes        100 0.2180
+    37 yes        100 0.2161
+    38 yes        100 0.2180
+    39 yes        100 0.2165
+    40 no         100 0.0130
+    41 no         100 0.0046
+    42 no         100 0.0045
+    43 no         100 0.0043
+    44 no         100 0.0046
+    45 no         100 0.0047
+    46 no         100 0.0050
+    47 no         100 0.0037
+    48 no         100 0.0049
+    49 no         100 0.0051
+events:
+  20.550 s  MOVE START
+  40.550 s  MOVE STOP
+accel: 5000 samples, 0 rejected lines
+gps: 111 lines: 50 RMC, 48 GGA, 11 other, 2 bad checksum, 0 malformed
+gps: 82 fixes with position, 16 without
+gps: last position 50.45033, 30.52340

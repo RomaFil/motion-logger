@@ -4,7 +4,11 @@
 #   make STATIC=1                           статична збірка (без залежності від libc на цілі)
 #   make DEBUG=1                            з відладочною інформацією
 #   make test                               зібрати й запустити тести (лише на цьому комп'ютері)
+#   make SANITIZE=address,undefined test    те саме з перевіркою пам'яті (ASan + UBSan; make clean до і після)
 #   make test-tsan                          те саме з ThreadSanitizer (перевірка гонок даних)
+#   make analyze                            зібрати інструмент аналізу запису (analyze_recording)
+#   make check-samples                      звірити звіт на tests/data з еталоном і з ground_truth.txt
+#   make update-sample-report               переписати еталон (після заміни даних на справжні)
 #   make format-check | format              перевірити / виправити стиль коду (clang-format)
 #   make install [DESTDIR=...] [PREFIX=...] встановити motion_logger (за замовчуванням в /usr/bin)
 #   make -n                                 показати команди, нічого не виконуючи
@@ -30,6 +34,12 @@ CFLAGS ?= $(OPT)
 override CFLAGS += -std=c11 -Wall -Wextra -MMD -MP -pthread -D_POSIX_C_SOURCE=200809L -Iinterfaces -Icore
 LDFLAGS ?=
 override LDFLAGS += -pthread
+
+# make SANITIZE=address,undefined test: усі тести з перевіркою пам'яті (потрібен make clean перед і після)
+ifneq ($(SANITIZE),)
+  override CFLAGS += -g -fsanitize=$(SANITIZE)
+  override LDFLAGS += -fsanitize=$(SANITIZE)
+endif
 ifeq ($(STATIC),1)
   override LDFLAGS += -static
 endif
@@ -42,14 +52,25 @@ OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 SIM_TARGET := $(BUILD)/sensor_sim
 SIM_OBJS := $(BUILD)/tools/sensor_sim.o $(BUILD)/core/io_util.o
 
+# Інструмент аналізу запису (крок 3.5): make analyze. У make all не входить, на плату не ставиться.
+ANALYZE_TARGET := $(BUILD)/analyze_recording
+ANALYZE_OBJS := $(BUILD)/tools/analyze_recording.o $(BUILD)/core/accel_csv.o \
+	$(BUILD)/core/motion_report.o $(BUILD)/core/motion_events.o $(BUILD)/core/motion_filter.o \
+	$(BUILD)/core/nmea.o $(BUILD)/core/nmea_parser.o
+
 # Тести: окремі програми з тих самих core-файлів (без main.c), запускаються командою make test.
 TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/test_log_writer \
-	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser $(BUILD)/test_motion_filter
+	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser $(BUILD)/test_motion_filter \
+	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
 	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
 	$(BUILD)/tests/test_nmea_parser.o $(BUILD)/core/nmea_parser.o \
-	$(BUILD)/tests/test_motion_filter.o $(BUILD)/core/motion_filter.o
+	$(BUILD)/tests/test_motion_filter.o $(BUILD)/core/motion_filter.o \
+	$(BUILD)/tests/test_accel_csv.o $(BUILD)/core/accel_csv.o \
+	$(BUILD)/tests/test_motion_events.o $(BUILD)/core/motion_events.o \
+	$(BUILD)/tests/test_motion_report.o $(BUILD)/core/motion_report.o \
+	$(ANALYZE_OBJS)
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
@@ -93,7 +114,29 @@ $(BUILD)/test_nmea_parser: $(BUILD)/tests/test_nmea_parser.o $(BUILD)/core/nmea_
 $(BUILD)/test_motion_filter: $(BUILD)/tests/test_motion_filter.o $(BUILD)/core/motion_filter.o
 	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
-test: $(TEST_TARGETS)
+$(BUILD)/test_accel_csv: $(BUILD)/tests/test_accel_csv.o $(BUILD)/core/accel_csv.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_motion_events: $(BUILD)/tests/test_motion_events.o $(BUILD)/core/motion_events.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_motion_report: $(BUILD)/tests/test_motion_report.o $(BUILD)/core/motion_report.o \
+		$(BUILD)/core/motion_events.o $(BUILD)/core/motion_filter.o
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
+
+$(ANALYZE_TARGET): $(ANALYZE_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
+
+analyze: $(ANALYZE_TARGET)
+
+# Запис у tests/data: звіт збігається з еталоном і з тим, що відбувалось (ground_truth.txt).
+check-samples: $(ANALYZE_TARGET)
+	sh tests/check_samples.sh $(ANALYZE_TARGET) tests/data
+
+update-sample-report: $(ANALYZE_TARGET)
+	sh tests/check_samples.sh $(ANALYZE_TARGET) tests/data --update
+
+test: $(TEST_TARGETS) check-samples
 	@for test_program in $(TEST_TARGETS); do ./$$test_program || exit 1; done
 
 # Те саме, але з перевіркою гонок даних (ThreadSanitizer): очікуємо 0 попереджень.
@@ -131,6 +174,22 @@ $(BUILD)/test_motion_filter_tsan: tests/test_motion_filter.c tests/check.h core/
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_motion_filter.c core/motion_filter.c -lm
 
+$(BUILD)/test_accel_csv_tsan: tests/test_accel_csv.c tests/check.h core/accel_csv.c core/accel_csv.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_accel_csv.c core/accel_csv.c
+
+$(BUILD)/test_motion_events_tsan: tests/test_motion_events.c tests/check.h core/motion_events.c \
+		core/motion_events.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_motion_events.c core/motion_events.c
+
+$(BUILD)/test_motion_report_tsan: tests/test_motion_report.c tests/check.h core/motion_report.c \
+		core/motion_report.h core/motion_events.c core/motion_events.h core/motion_filter.c \
+		core/motion_filter.h core/accel_csv.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_motion_report.c core/motion_report.c \
+		core/motion_events.c core/motion_filter.c -lm
+
 test-tsan: $(TSAN_TARGETS)
 	@for test_program in $(TSAN_TARGETS); do ./$$test_program || exit 1; done
 
@@ -161,6 +220,8 @@ help:
 	@echo "make format-check | format             - стиль коду"
 	@echo "make install [DESTDIR=...]             - встановити motion_logger"
 	@echo "make -n                                - лише показати команди"
+	@echo "make analyze                            - інструмент аналізу запису"
+	@echo "make check-samples                     - звірити звіт на tests/data"
 	@echo "make clean | help"
 
-.PHONY: all test test-tsan format-check format install clean help
+.PHONY: all analyze check-samples update-sample-report test test-tsan format-check format install clean help
