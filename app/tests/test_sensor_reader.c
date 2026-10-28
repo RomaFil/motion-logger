@@ -88,11 +88,14 @@ static void test_run_rejects_bad_arguments(void)
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
 	init_fake(&fake);
 
-	CHECK(sensor_reader_run(NULL, &rb, &never_stop, &stats) == -EINVAL);
-	CHECK(sensor_reader_run(&no_read, &rb, &never_stop, &stats) == -EINVAL);
-	CHECK(sensor_reader_run(&fake.base, NULL, &never_stop, &stats) == -EINVAL);
-	CHECK(sensor_reader_run(&fake.base, &rb, NULL, &stats) == -EINVAL);
-	CHECK(sensor_reader_run(&fake.base, &rb, &never_stop, NULL) == -EINVAL);
+	CHECK(sensor_reader_run(NULL, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == -EINVAL);
+	CHECK(sensor_reader_run(&no_read, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) ==
+	      -EINVAL);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, NULL, &never_stop, &stats) ==
+	      -EINVAL);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, NULL, &stats) == -EINVAL);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, NULL) ==
+	      -EINVAL);
 
 	ring_buffer_destroy(&rb);
 }
@@ -110,7 +113,7 @@ static void test_samples_arrive_in_order_with_all_fields(void)
 	CHECK(ring_buffer_init(&rb, storage, BUFFER_CAPACITY) == 0);
 	init_fake(&fake);
 
-	CHECK(sensor_reader_run(&fake.base, &rb, &never_stop, &stats) == 0);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == 0);
 	CHECK(stats.received == SAMPLE_COUNT);
 	CHECK(stats.dropped == 0);
 
@@ -142,7 +145,7 @@ static void test_interrupted_read_is_retried(void)
 	init_fake(&fake);
 	fake.interrupt_first = true;
 
-	CHECK(sensor_reader_run(&fake.base, &rb, &never_stop, &stats) == 0);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == 0);
 	CHECK(stats.received == SAMPLE_COUNT);
 
 	ring_buffer_destroy(&rb);
@@ -162,7 +165,7 @@ static void test_sensor_error_is_returned(void)
 	fake.fail_at = 2;
 	fake.fail_code = -EIO;
 
-	CHECK(sensor_reader_run(&fake.base, &rb, &never_stop, &stats) == -EIO);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == -EIO);
 	CHECK(stats.received == 2);
 	CHECK(ring_buffer_count(&rb) == 2);
 
@@ -182,12 +185,36 @@ static void test_full_buffer_counts_dropped_and_keeps_oldest(void)
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
 	init_fake(&fake);
 
-	CHECK(sensor_reader_run(&fake.base, &rb, &never_stop, &stats) == 0);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == 0);
 	CHECK(stats.received == SAMPLE_COUNT);
 	CHECK(stats.dropped == SAMPLE_COUNT - SMALL_CAPACITY);
 
 	CHECK(ring_buffer_pop(&rb, &item) == 0);
 	CHECK(item.time_ms == 0);
+
+	ring_buffer_destroy(&rb);
+}
+
+/* Тип джерела з параметра потрапляє в кожен запис (додатковий акселерометр відрізняється від
+ * основного). */
+static void test_source_parameter_is_stored_in_every_sample(void)
+{
+	static volatile sig_atomic_t never_stop;
+	struct sample storage[BUFFER_CAPACITY];
+	struct ring_buffer rb;
+	struct fake_sensor fake;
+	struct sensor_reader_stats stats;
+	struct sample item;
+	size_t i;
+
+	CHECK(ring_buffer_init(&rb, storage, BUFFER_CAPACITY) == 0);
+	init_fake(&fake);
+
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL2, &rb, &never_stop, &stats) == 0);
+	for (i = 0; i < SAMPLE_COUNT; i++) {
+		CHECK(ring_buffer_pop(&rb, &item) == 0);
+		CHECK(item.source == SAMPLE_SOURCE_ACCEL2);
+	}
 
 	ring_buffer_destroy(&rb);
 }
@@ -204,7 +231,8 @@ static void test_stop_flag_prevents_any_read(void)
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
 	init_fake(&fake);
 
-	CHECK(sensor_reader_run(&fake.base, &rb, &already_stopped, &stats) == 0);
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &already_stopped, &stats) ==
+	      0);
 	CHECK(stats.received == 0);
 	CHECK(fake.read_calls == 0);
 
@@ -218,6 +246,7 @@ int main(void)
 	test_interrupted_read_is_retried();
 	test_sensor_error_is_returned();
 	test_full_buffer_counts_dropped_and_keeps_oldest();
+	test_source_parameter_is_stored_in_every_sample();
 	test_stop_flag_prevents_any_read();
 
 	if (failures != 0) {

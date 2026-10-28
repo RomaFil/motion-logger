@@ -8,9 +8,9 @@
 #include <string.h>
 
 /* Пакує відлік акселерометра в запис для буфера. */
-static struct sample make_accel_sample(const struct accel_sample *accel);
+static struct sample make_accel_sample(const struct accel_sample *accel, enum sample_source source);
 
-int sensor_reader_run(struct sensor *sensor, struct ring_buffer *rb,
+int sensor_reader_run(struct sensor *sensor, enum sample_source source, struct ring_buffer *rb,
 		      const volatile sig_atomic_t *stop, struct sensor_reader_stats *stats)
 {
 	if (sensor == NULL || sensor->read == NULL || rb == NULL || stop == NULL || stats == NULL) {
@@ -34,7 +34,7 @@ int sensor_reader_run(struct sensor *sensor, struct ring_buffer *rb,
 			return result;
 		}
 
-		item = make_accel_sample(&accel);
+		item = make_accel_sample(&accel, source);
 		stats->received++;
 		if (ring_buffer_push(rb, &item) != 0) {
 			stats->dropped++;
@@ -44,9 +44,9 @@ int sensor_reader_run(struct sensor *sensor, struct ring_buffer *rb,
 	return 0;
 }
 
-static struct sample make_accel_sample(const struct accel_sample *accel)
+static struct sample make_accel_sample(const struct accel_sample *accel, enum sample_source source)
 {
-	struct sample item = {.source = SAMPLE_SOURCE_ACCEL,
+	struct sample item = {.source = source,
 			      .time_ms = accel->time_ms,
 			      .x_g = accel->x_g,
 			      .y_g = accel->y_g,

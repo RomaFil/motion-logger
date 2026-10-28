@@ -27,8 +27,10 @@ struct accel_sample {
 
 /** @brief Звідки взято запис у буфері. */
 enum sample_source {
-	SAMPLE_SOURCE_SIM,   /**< імітатор sensor_sim: лише число-лічильник */
-	SAMPLE_SOURCE_ACCEL, /**< акселерометр: три осі в g */
+	SAMPLE_SOURCE_SIM,    /**< імітатор sensor_sim: лише число-лічильник */
+	SAMPLE_SOURCE_ACCEL,  /**< основний акселерометр: три осі в g, з нього рахується рух */
+	SAMPLE_SOURCE_ACCEL2, /**< додатковий акселерометр: три осі в g, лише для журналу */
+	SAMPLE_SOURCE_GPS,    /**< GPS: позиція й швидкість (розібраний рядок RMC) */
 };
 
 /**

@@ -253,7 +253,8 @@ static int run_replay(const struct options *options, struct ring_buffer *buffer,
 		return result;
 	}
 
-	result = sensor_reader_run(&player.base, buffer, &stop_requested, &read_stats);
+	result = sensor_reader_run(&player.base, SAMPLE_SOURCE_ACCEL, buffer, &stop_requested,
+				   &read_stats);
 	stats->received = read_stats.received;
 	stats->dropped = read_stats.dropped;
 	if (result < 0) {

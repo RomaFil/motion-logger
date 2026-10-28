@@ -6,7 +6,8 @@
  * struct sensor «дай наступний відлік». Що за об'єктом (програвач CSV, пізніше справжній
  * MPU6050), цьому модулю байдуже: так ядро програми відокремлене від заліза.
  *
- * Кожен відлік пакується в struct sample (джерело ACCEL) з міткою часу від датчика.
+ * Кожен відлік пакується в struct sample з міткою часу від датчика. Яке саме це джерело (основний
+ * акселерометр чи додатковий) каже параметр source: від нього залежить, як лог обробить запис.
  */
 #ifndef SENSOR_READER_H
 #define SENSOR_READER_H
@@ -32,6 +33,8 @@ struct sensor_reader_stats {
  * має сам повертатися (див. -EINTR нижче).
  *
  * @param sensor датчик з заповненим read
+ * @param source SAMPLE_SOURCE_ACCEL чи інше джерело з осями x, y, z у g (проставляється в кожен
+ * запис)
  * @param rb     буфер, ініціалізований через ring_buffer_init()
  * @param stop   прапорець зупинки
  * @param stats  сюди пишеться підсумок; поля обнуляються на початку
@@ -39,7 +42,7 @@ struct sensor_reader_stats {
  *         будь-який покажчик NULL; інакше мінус код помилки датчика. Код -EINTR від
  *         датчика не вважається помилкою: читач повертається до перевірки прапорця зупинки.
  */
-int sensor_reader_run(struct sensor *sensor, struct ring_buffer *rb,
+int sensor_reader_run(struct sensor *sensor, enum sample_source source, struct ring_buffer *rb,
 		      const volatile sig_atomic_t *stop, struct sensor_reader_stats *stats);
 
 #endif /* SENSOR_READER_H */
