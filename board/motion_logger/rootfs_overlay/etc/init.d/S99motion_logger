@@ -1,40 +1,88 @@
 #!/bin/sh
 # Автозапуск motion_logger (BusyBox init викликає S* скрипти з аргументом start / stop).
-# Лише POSIX sh: на платі це BusyBox ash, без bash-конструкцій.
-DAEMON=/usr/bin/motion_logger
-PIDFILE=/var/run/motion_logger.pid
-# Налагоджувальний порт DBG1 (GPIO14/15). Повідомлення ядра й init-скриптів ідуть на
-# консоль ядра (ttyAMA10, JST-роз'єм), а на ttyAMA0 їх треба спрямувати самим.
+# Пишемо на POSIX sh: на платі це BusyBox ash, без bash-конструкцій.
+# Контракт скрипта (презентація «Init», слайди 26 і 30): start і stop ідемпотентні, код виходу
+# 0 = успіх, status повертає 3, якщо служба не працює.
+NAME=motion_logger
+DAEMON=/usr/bin/$NAME
+PIDFILE=/var/run/$NAME.pid
+LOGFILE=/var/log/$NAME.log
+# Налагоджувальний порт DBG1 (GPIO14/15). Консоль ядра йде на ttyAMA10 (JST-рознім), а ttyAMA0
+# вільний, тож пишемо туди, щоб бачити вивід без JST-кабеля.
 DEBUG_TTY=/dev/ttyAMA0
+# Скільки секунд чекати завершення після SIGTERM, перш ніж вбити процес через SIGKILL.
+STOP_TIMEOUT=5
+
+# Параметри запуску (джерело відліків, лог) лежать окремо, щоб не правити скрипт:
+# /etc/default/motion_logger, змінна MOTION_LOGGER_OPTS.
+MOTION_LOGGER_OPTS=""
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+# Службова функція: 0, якщо процес із PID-файлу живий.
+is_running() {
+	[ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
 
 start() {
-	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-		echo "motion_logger: already running"
-		return 1
+	if is_running; then
+		echo "$NAME: already running (pid $(cat "$PIDFILE"))"
+		return 0
 	fi
+	rm -f "$PIDFILE" # застарілий PID-файл від аварійного завершення
+
+	# Вивід: на DBG1, якщо порт доступний на запис, інакше у файл (слайд 39: логи кудись пишуться).
 	if [ -w "$DEBUG_TTY" ]; then
-		# вивід програми й стан запуску дублюємо на DBG1, щоб бачити їх без JST-шнурка
-		"$DAEMON" > "$DEBUG_TTY" 2>&1 &
-		echo $! > "$PIDFILE"
-		echo "motion_logger: started (output on $DEBUG_TTY)" > "$DEBUG_TTY"
+		# shellcheck disable=SC2086  # параметри з файлу налаштувань мають розбиватись на слова
+		"$DAEMON" $MOTION_LOGGER_OPTS >"$DEBUG_TTY" 2>&1 &
 	else
-		"$DAEMON" &
-		echo $! > "$PIDFILE"
+		# shellcheck disable=SC2086
+		"$DAEMON" $MOTION_LOGGER_OPTS >>"$LOGFILE" 2>&1 &
 	fi
-	echo "motion_logger: started"
+	echo $! >"$PIDFILE"
+	echo "$NAME: started"
 }
 
 stop() {
-	if [ -f "$PIDFILE" ]; then
-		kill "$(cat "$PIDFILE")" 2>/dev/null
+	if ! is_running; then
 		rm -f "$PIDFILE"
+		echo "$NAME: not running"
+		return 0
 	fi
-	echo "motion_logger: stopped"
+
+	pid=$(cat "$PIDFILE")
+	kill "$pid" 2>/dev/null # спершу SIGTERM: програма дозаписує буфер у лог і виходить сама
+	waited=0
+	while [ "$waited" -lt "$STOP_TIMEOUT" ] && kill -0 "$pid" 2>/dev/null; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 "$pid" 2>/dev/null; then
+		echo "$NAME: pid $pid ignored SIGTERM, killing" >&2
+		kill -9 "$pid" 2>/dev/null
+	fi
+	rm -f "$PIDFILE"
+	echo "$NAME: stopped"
+}
+
+status() {
+	if is_running; then
+		echo "$NAME is running (pid $(cat "$PIDFILE"))"
+		return 0
+	fi
+	echo "$NAME is not running"
+	return 3
 }
 
 case "$1" in
-	start) start ;;
-	stop) stop ;;
-	restart) stop; start ;;
-	*) echo "Usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+start) start ;;
+stop) stop ;;
+restart)
+	stop
+	start
+	;;
+status) status ;;
+*)
+	echo "Usage: $0 {start|stop|restart|status}" >&2
+	exit 1
+	;;
 esac
