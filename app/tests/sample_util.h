@@ -18,6 +18,15 @@ static inline struct sample make_sim_sample(int32_t value)
 	return item;
 }
 
+/* Запис акселерометра. */
+static inline struct sample make_accel_item(int64_t time_ms, double x_g, double y_g, double z_g)
+{
+	struct sample item = {
+	    .source = SAMPLE_SOURCE_ACCEL, .time_ms = time_ms, .x_g = x_g, .y_g = y_g, .z_g = z_g};
+
+	return item;
+}
+
 /* Кладе в буфер запис імітатора з числом value; результат такий, як у ring_buffer_push. */
 static inline int push_value(struct ring_buffer *rb, int32_t value)
 {

@@ -8,6 +8,7 @@
 #   make test-tsan                          те саме з ThreadSanitizer (перевірка гонок даних)
 #   make analyze                            зібрати інструмент аналізу запису (analyze_recording)
 #   make check-samples                      звірити звіт на tests/data з еталоном і з ground_truth.txt
+#   make check-replay                       програти tests/data через motion_logger --replay, звірити події в лозі
 #   make update-sample-report               переписати еталон (після заміни даних на справжні)
 #   make format-check | format              перевірити / виправити стиль коду (clang-format)
 #   make install [DESTDIR=...] [PREFIX=...] встановити motion_logger (за замовчуванням в /usr/bin)
@@ -31,7 +32,7 @@ endif
 # рядка (так робить Buildroot). А обов'язкові прапорці нижче дописуємо через override: інакше
 # CFLAGS з командного рядка перекрила б наші -std/-Wall/-MMD.
 CFLAGS ?= $(OPT)
-override CFLAGS += -std=c11 -Wall -Wextra -MMD -MP -pthread -D_POSIX_C_SOURCE=200809L -Iinterfaces -Icore
+override CFLAGS += -std=c11 -Wall -Wextra -MMD -MP -pthread -D_POSIX_C_SOURCE=200809L -Iinterfaces -Icore -Idrivers
 LDFLAGS ?=
 override LDFLAGS += -pthread
 
@@ -45,7 +46,9 @@ ifeq ($(STATIC),1)
 endif
 
 TARGET := $(BUILD)/motion_logger
-SRCS := main.c core/ring_buffer.c core/sample_reader.c core/log_writer.c core/io_util.c
+SRCS := main.c core/ring_buffer.c core/sample_reader.c core/sensor_reader.c core/log_writer.c \
+	core/io_util.c core/motion_report.c core/motion_events.c core/motion_filter.c core/accel_csv.c \
+	drivers/csv_player.c
 OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
 # Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
@@ -61,7 +64,8 @@ ANALYZE_OBJS := $(BUILD)/tools/analyze_recording.o $(BUILD)/core/accel_csv.o \
 # Тести: окремі програми з тих самих core-файлів (без main.c), запускаються командою make test.
 TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/test_log_writer \
 	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser $(BUILD)/test_motion_filter \
-	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report
+	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report \
+	$(BUILD)/test_sensor_reader $(BUILD)/test_csv_player
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
 	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
@@ -70,18 +74,19 @@ TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader
 	$(BUILD)/tests/test_accel_csv.o $(BUILD)/core/accel_csv.o \
 	$(BUILD)/tests/test_motion_events.o $(BUILD)/core/motion_events.o \
 	$(BUILD)/tests/test_motion_report.o $(BUILD)/core/motion_report.o \
-	$(ANALYZE_OBJS)
+	$(BUILD)/tests/test_sensor_reader.o $(BUILD)/core/sensor_reader.o 	$(BUILD)/tests/test_csv_player.o $(BUILD)/drivers/csv_player.o 	$(ANALYZE_OBJS)
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
 # Форматер: версія зафіксована в .clang-format (23.1.1). Інша команда: make format-check CLANG_FORMAT=...
 CLANG_FORMAT ?= clang-format
-FORMAT_FILES := $(wildcard main.c core/*.c core/*.h interfaces/*.h tests/*.c tests/*.h tools/*.c)
+FORMAT_FILES := $(wildcard main.c core/*.c core/*.h drivers/*.c drivers/*.h interfaces/*.h \
+	tests/*.c tests/*.h tools/*.c)
 
 all: $(TARGET) $(SIM_TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
 $(SIM_TARGET): $(SIM_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -101,8 +106,17 @@ $(BUILD)/test_sample_reader: $(BUILD)/tests/test_sample_reader.o $(BUILD)/core/s
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_log_writer: $(BUILD)/tests/test_log_writer.o $(BUILD)/core/log_writer.o \
-		$(BUILD)/core/io_util.o $(BUILD)/core/ring_buffer.o
+		$(BUILD)/core/io_util.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/motion_report.o \
+		$(BUILD)/core/motion_events.o $(BUILD)/core/motion_filter.o
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
+
+$(BUILD)/test_sensor_reader: $(BUILD)/tests/test_sensor_reader.o $(BUILD)/core/sensor_reader.o \
+		$(BUILD)/core/ring_buffer.o
 	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_csv_player: $(BUILD)/tests/test_csv_player.o $(BUILD)/drivers/csv_player.o \
+		$(BUILD)/core/accel_csv.o $(BUILD)/core/io_util.o
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
 $(BUILD)/test_nmea: $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -136,12 +150,16 @@ check-samples: $(ANALYZE_TARGET)
 update-sample-report: $(ANALYZE_TARGET)
 	sh tests/check_samples.sh $(ANALYZE_TARGET) tests/data --update
 
-test: $(TEST_TARGETS) check-samples
+# Наскрізна перевірка: motion_logger --replay на tests/data дає в лозі ті самі події, що й analyze_recording.
+check-replay: $(TARGET) $(ANALYZE_TARGET)
+	sh tests/check_replay.sh $(TARGET) $(ANALYZE_TARGET) tests/data
+
+test: $(TEST_TARGETS) check-samples check-replay
 	@for test_program in $(TEST_TARGETS); do ./$$test_program || exit 1; done
 
 # Те саме, але з перевіркою гонок даних (ThreadSanitizer): очікуємо 0 попереджень.
 TSAN_FLAGS := -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -g -O1 -fsanitize=thread \
-	-pthread -Iinterfaces -Icore -Itests
+	-pthread -Iinterfaces -Icore -Idrivers -Itests
 TSAN_TARGETS := $(addsuffix _tsan,$(TEST_TARGETS))
 
 $(BUILD)/test_ring_buffer_tsan: tests/test_ring_buffer.c tests/check.h core/ring_buffer.c \
@@ -155,11 +173,24 @@ $(BUILD)/test_sample_reader_tsan: tests/test_sample_reader.c tests/check.h core/
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_sample_reader.c core/sample_reader.c core/ring_buffer.c \
 		core/io_util.c
 
+$(BUILD)/test_sensor_reader_tsan: tests/test_sensor_reader.c tests/check.h core/sensor_reader.c \
+		core/sensor_reader.h core/ring_buffer.c core/ring_buffer.h interfaces/sensor.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_sensor_reader.c core/sensor_reader.c core/ring_buffer.c
+
+$(BUILD)/test_csv_player_tsan: tests/test_csv_player.c tests/check.h drivers/csv_player.c \
+		drivers/csv_player.h core/accel_csv.c core/accel_csv.h core/io_util.c core/io_util.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_csv_player.c drivers/csv_player.c core/accel_csv.c \
+		core/io_util.c -lm
+
 $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_writer.c \
-		core/log_writer.h core/io_util.c core/io_util.h core/ring_buffer.c core/ring_buffer.h
+		core/log_writer.h core/io_util.c core/io_util.h core/ring_buffer.c core/ring_buffer.h \
+		core/motion_report.c core/motion_report.h core/motion_events.c core/motion_events.h \
+		core/motion_filter.c core/motion_filter.h core/motion_defaults.h
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_log_writer.c core/log_writer.c core/io_util.c \
-		core/ring_buffer.c
+		core/ring_buffer.c core/motion_report.c core/motion_events.c core/motion_filter.c -lm
 
 $(BUILD)/test_nmea_tsan: tests/test_nmea.c tests/check.h core/nmea.c core/nmea.h
 	@mkdir -p $(@D)
@@ -223,6 +254,7 @@ help:
 	@echo "make -n                                - лише показати команди"
 	@echo "make analyze                            - інструмент аналізу запису"
 	@echo "make check-samples                     - звірити звіт на tests/data"
+	@echo "make check-replay                      - програти tests/data через motion_logger і звірити лог"
 	@echo "make clean | help"
 
-.PHONY: all analyze check-samples update-sample-report test test-tsan format-check format install clean help
+.PHONY: all analyze check-samples check-replay update-sample-report test test-tsan format-check format install clean help

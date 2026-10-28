@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -225,6 +226,190 @@ static void test_second_run_appends_to_existing_file(void)
 	unlink(path);
 }
 
+static void test_format_event_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+
+	CHECK(log_writer_format_event(line, sizeof(line), 20550, MOTION_EVENT_START) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":20550,\"src\":\"accel\",\"event\":\"MOVE_START\"}\n") == 0);
+	CHECK(log_writer_format_event(line, sizeof(line), 40550, MOTION_EVENT_STOP) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":40550,\"src\":\"accel\",\"event\":\"MOVE_STOP\"}\n") == 0);
+}
+
+static void test_format_event_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+
+	CHECK(log_writer_format_event(NULL, sizeof(line), 0, MOTION_EVENT_START) == -EINVAL);
+	CHECK(log_writer_format_event(line, sizeof(line), 0, MOTION_EVENT_NONE) == -EINVAL);
+	CHECK(log_writer_format_event(tiny, sizeof(tiny), 0, MOTION_EVENT_START) == -ENOSPC);
+}
+
+/* Рядок з подією: розбирає тип і час; повертає false, якщо рядок не схожий на подію. */
+static bool parse_event_line(const char *line, long long *time_ms, char *name, size_t name_size)
+{
+	char parsed[LOG_WRITER_SOURCE_SIZE];
+
+	if (sscanf(line, "{\"t_ms\":%lld,\"src\":\"accel\",\"event\":\"%15[A-Z_]\"}", time_ms,
+		   parsed) != 2) {
+		return false;
+	}
+	snprintf(name, name_size, "%s", parsed);
+
+	return true;
+}
+
+#define STILL_SECONDS 2
+#define MOVING_SECONDS 3
+#define ACCEL_RATE_HZ 100
+#define MS_PER_SAMPLE (1000 / ACCEL_RATE_HZ)
+#define MOVING_AMPLITUDE_G 0.4
+
+/*
+ * Кладе в буфер вигаданий запис: 2 с стою (1 g по Z), 3 с «іду» (Z стрибає між 1,4 і 0,6 g),
+ * 2 с знову стою. Повертає кількість відліків і час, з якого починається рух.
+ */
+static size_t fill_still_moving_still(struct ring_buffer *rb, int64_t *moving_start_ms,
+				      int64_t *moving_end_ms)
+{
+	const size_t total =
+	    (size_t)(STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS) * ACCEL_RATE_HZ;
+	size_t i;
+
+	*moving_start_ms = STILL_SECONDS * 1000;
+	*moving_end_ms = (STILL_SECONDS + MOVING_SECONDS) * 1000;
+	for (i = 0; i < total; i++) {
+		int64_t time_ms = (int64_t)i * MS_PER_SAMPLE;
+		bool moving = time_ms >= *moving_start_ms && time_ms < *moving_end_ms;
+		double z_g = 1.0;
+		struct sample item;
+
+		if (moving) {
+			z_g += (i % 2 == 0) ? MOVING_AMPLITUDE_G : -MOVING_AMPLITUDE_G;
+		}
+		item = make_accel_item(time_ms, 0.0, 0.0, z_g);
+		CHECK(ring_buffer_push(rb, &item) == 0);
+	}
+
+	return total;
+}
+
+/* Читає лог і перевіряє: рівно два рядки, MOVE_START у межах руху, потім MOVE_STOP після нього. */
+static void check_start_then_stop(const char *path, int64_t moving_start_ms, int64_t moving_end_ms)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char name[LOG_WRITER_SOURCE_SIZE];
+	long long start_ms = -1;
+	long long stop_ms = -1;
+	FILE *file = fopen(path, "r");
+
+	CHECK(file != NULL);
+	if (file == NULL) {
+		return;
+	}
+
+	CHECK(fgets(line, sizeof(line), file) != NULL);
+	CHECK(parse_event_line(line, &start_ms, name, sizeof(name)));
+	CHECK(strcmp(name, "MOVE_START") == 0);
+	CHECK(start_ms > moving_start_ms && start_ms < moving_end_ms);
+
+	CHECK(fgets(line, sizeof(line), file) != NULL);
+	CHECK(parse_event_line(line, &stop_ms, name, sizeof(name)));
+	CHECK(strcmp(name, "MOVE_STOP") == 0);
+	CHECK(stop_ms > moving_end_ms);
+
+	CHECK(fgets(line, sizeof(line), file) == NULL); /* більше нічого: відліки в лог не йдуть */
+	fclose(file);
+}
+
+/* Головна перевірка кроку 5.3: «стою, іду, стою» дає в лозі рівно MOVE_START і MOVE_STOP. */
+static void test_accel_samples_produce_start_and_stop_events(void)
+{
+	static struct sample
+	    storage[(STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS) * ACCEL_RATE_HZ];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	int64_t moving_start_ms;
+	int64_t moving_end_ms;
+	size_t samples;
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	samples = fill_still_moving_still(&rb, &moving_start_ms, &moving_end_ms);
+	CHECK(samples == sizeof(storage) / sizeof(storage[0]));
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.written == 2);
+	CHECK(stats.events == 2);
+	CHECK(stats.failed == 0);
+	CHECK(ring_buffer_is_empty(&rb));
+	check_start_then_stop(path, moving_start_ms, moving_end_ms);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Відлік із часом, що спадає, відкидається й рахується як помилка; решта працює далі. */
+static void test_accel_sample_with_decreasing_time_counts_as_failed(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct sample item;
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	item = make_accel_item(1000, 0.0, 0.0, 1.0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+	item = make_accel_item(500, 0.0, 0.0, 1.0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.failed == 1);
+	CHECK(stats.written == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Числа імітатора й відліки акселерометра в одному буфері не заважають один одному. */
+static void test_sim_and_accel_samples_share_the_log(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct sample item;
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(push_value(&rb, 0) == 0);
+	item = make_accel_item(0, 0.0, 0.0, 1.0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+	CHECK(push_value(&rb, 1) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.written == 2); /* два числа імітатора; відлік у спокої подій не дав */
+	CHECK(stats.events == 0);
+	CHECK(stats.failed == 0);
+	check_log_file(path, 2);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 /* Число імітатора потрапляє в лог із тією міткою часу, з якою воно прийшло, а не з часом запису. */
 static void test_sim_sample_keeps_its_own_timestamp(void)
 {
@@ -260,11 +445,16 @@ int main(void)
 {
 	test_format_line_produces_exact_json();
 	test_format_line_rejects_bad_input();
+	test_format_event_produces_exact_json();
+	test_format_event_rejects_bad_input();
 	test_start_rejects_bad_arguments();
 	test_start_reports_unwritable_path();
 	test_stop_drains_prefilled_buffer();
 	test_concurrent_producer_loses_nothing();
 	test_second_run_appends_to_existing_file();
+	test_accel_samples_produce_start_and_stop_events();
+	test_accel_sample_with_decreasing_time_counts_as_failed();
+	test_sim_and_accel_samples_share_the_log();
 	test_sim_sample_keeps_its_own_timestamp();
 
 	if (failures != 0) {

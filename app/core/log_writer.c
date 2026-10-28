@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "io_util.h"
+#include "motion_defaults.h"
 #include "sensor.h"
 
 /* Як довго потік спить, коли в буфері порожньо. 10 мс = не більше ~100 прокидань на секунду. */
@@ -23,6 +24,7 @@
 
 /* Ім'я джерела в рядках логу. Лише a-z, 0-9, _: воно йде в JSON без екранування. */
 #define SIM_SOURCE_NAME "sim"
+#define ACCEL_SOURCE_NAME "accel"
 
 #define LOG_FILE_MODE 0644
 
@@ -31,6 +33,7 @@ static bool is_valid_source(const char *source);
 static void *run_writer_thread(void *argument);
 static void handle_sample(struct log_writer *lw, const struct sample *item);
 static void write_sim_sample(struct log_writer *lw, const struct sample *item);
+static void write_accel_sample(struct log_writer *lw, const struct sample *item);
 static void write_line(struct log_writer *lw, const char *line, int length);
 static void sleep_idle(void);
 
@@ -53,12 +56,45 @@ int log_writer_format_line(char *out, size_t size, const char *source, int64_t t
 	return length;
 }
 
+int log_writer_format_event(char *out, size_t size, int64_t timestamp_ms, enum motion_event event)
+{
+	const char *name;
+	int length;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	if (event == MOTION_EVENT_START) {
+		name = "MOVE_START";
+	} else if (event == MOTION_EVENT_STOP) {
+		name = "MOVE_STOP";
+	} else {
+		return -EINVAL;
+	}
+
+	length = snprintf(out, size, "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"event\":\"%s\"}\n",
+			  timestamp_ms, ACCEL_SOURCE_NAME, name);
+	if (length < 0 || (size_t)length >= size) {
+		return -ENOSPC;
+	}
+
+	return length;
+}
+
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path)
 {
 	int error;
 
 	if (lw == NULL || rb == NULL || path == NULL) {
 		return -EINVAL;
+	}
+
+	/* Параметри допустимі за побудовою (див. motion_defaults.h), помилка тут це помилка в них.
+	 */
+	error = motion_report_init(&lw->detector, MOTION_DEFAULT_WINDOW, MOTION_DEFAULT_THRESHOLD_G,
+				   MOTION_DEFAULT_CONFIRM);
+	if (error < 0) {
+		return error;
 	}
 
 	lw->fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, LOG_FILE_MODE);
@@ -162,8 +198,11 @@ static void handle_sample(struct log_writer *lw, const struct sample *item)
 	case SAMPLE_SOURCE_SIM:
 		write_sim_sample(lw, item);
 		break;
+	case SAMPLE_SOURCE_ACCEL:
+		write_accel_sample(lw, item);
+		break;
 	default:
-		lw->stats.failed++;
+		lw->stats.failed++; /* невідоме джерело: краще порахувати, ніж мовчки загубити */
 		break;
 	}
 }
@@ -176,6 +215,30 @@ static void write_sim_sample(struct log_writer *lw, const struct sample *item)
 	    log_writer_format_line(line, sizeof(line), SIM_SOURCE_NAME, item->time_ms, item->value);
 
 	write_line(lw, line, length);
+}
+
+/* Відлік акселерометра: у лог іде лише подія «рух почався / закінчився», сам відлік ні. */
+static void write_accel_sample(struct log_writer *lw, const struct sample *item)
+{
+	struct accel_sample accel = {
+	    .time_ms = item->time_ms, .x_g = item->x_g, .y_g = item->y_g, .z_g = item->z_g};
+	struct motion_report_update update;
+	char line[LOG_WRITER_LINE_SIZE];
+	int length;
+
+	if (motion_report_add_sample(&lw->detector, &accel, &update) < 0) {
+		lw->stats.failed++; /* час спадає або число не скінченне: відлік відкинуто */
+		return;
+	}
+	if (update.event == MOTION_EVENT_NONE) {
+		return;
+	}
+
+	length = log_writer_format_event(line, sizeof(line), item->time_ms, update.event);
+	write_line(lw, line, length);
+	if (length >= 0) {
+		lw->stats.events++;
+	}
 }
 
 /* Записує готовий рядок одним викликом (length < 0 це помилка форматування); рахує результат. */
