@@ -6,6 +6,8 @@
 #   make test                               зібрати й запустити тести (лише на цьому комп'ютері)
 #   make test-tsan                          те саме з ThreadSanitizer (перевірка гонок даних)
 #   make format-check | format              перевірити / виправити стиль коду (clang-format)
+#   make install [DESTDIR=...] [PREFIX=...] встановити motion_logger (за замовчуванням в /usr/bin)
+#   make -n                                 показати команди, нічого не виконуючи
 #   make clean | help
 # Buildroot викликає: make CC=... CFLAGS=... BUILD=...  (див. package/motion_logger/motion_logger.mk)
 
@@ -21,10 +23,11 @@ else
   OPT := -O2
 endif
 
-# Обов'язкові прапорці дописуємо через override: змінна CFLAGS з командного рядка
-# (так її передає Buildroot) інакше перекрила б наші -std/-Wall/-MMD.
-CFLAGS ?=
-override CFLAGS += -std=c11 -Wall -Wextra $(OPT) -MMD -MP -pthread -D_POSIX_C_SOURCE=200809L -Iinterfaces -Icore
+# CFLAGS ?= $(OPT): рівень оптимізації лише за замовчуванням, його можна замінити з командного
+# рядка (так робить Buildroot). А обов'язкові прапорці нижче дописуємо через override: інакше
+# CFLAGS з командного рядка перекрила б наші -std/-Wall/-MMD.
+CFLAGS ?= $(OPT)
+override CFLAGS += -std=c11 -Wall -Wextra -MMD -MP -pthread -D_POSIX_C_SOURCE=200809L -Iinterfaces -Icore
 LDFLAGS ?=
 override LDFLAGS += -pthread
 ifeq ($(STATIC),1)
@@ -110,6 +113,14 @@ format-check:
 format:
 	$(CLANG_FORMAT) -i $(FORMAT_FILES)
 
+# Звичайна установка: DESTDIR це корінь чужої файлової системи (так збирають пакети й образи),
+# PREFIX це місце всередині неї. Buildroot-пакет копіює бінарник сам і цієї цілі не викликає.
+PREFIX ?= /usr
+INSTALL ?= install
+
+install: $(TARGET)
+	$(INSTALL) -D -m 0755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/motion_logger
+
 clean:
 	rm -rf $(BUILD)
 
@@ -121,6 +132,8 @@ help:
 	@echo "make test                              - тести"
 	@echo "make test-tsan                         - тести з ThreadSanitizer"
 	@echo "make format-check | format             - стиль коду"
+	@echo "make install [DESTDIR=...]             - встановити motion_logger"
+	@echo "make -n                                - лише показати команди"
 	@echo "make clean | help"
 
-.PHONY: all test test-tsan format-check format clean help
+.PHONY: all test test-tsan format-check format install clean help
