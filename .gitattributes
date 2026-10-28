@@ -7,3 +7,7 @@ Makefile text eol=lf
 *.c text eol=lf
 *.h text eol=lf
 *.in text eol=lf
+*.csv text eol=lf
+*.py text eol=lf
+# NMEA як є від модуля: з CRLF у кінці рядків, git їх не чіпає
+*.nmea -text
