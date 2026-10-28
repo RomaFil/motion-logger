@@ -44,10 +44,11 @@ SIM_OBJS := $(BUILD)/tools/sensor_sim.o $(BUILD)/core/io_util.o
 
 # Тести: окремі програми з тих самих core-файлів (без main.c), запускаються командою make test.
 TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/test_log_writer \
-	$(BUILD)/test_nmea
+	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
-	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o
+	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
+	$(BUILD)/tests/test_nmea_parser.o $(BUILD)/core/nmea_parser.o
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
@@ -84,6 +85,10 @@ $(BUILD)/test_log_writer: $(BUILD)/tests/test_log_writer.o $(BUILD)/core/log_wri
 $(BUILD)/test_nmea: $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+$(BUILD)/test_nmea_parser: $(BUILD)/tests/test_nmea_parser.o $(BUILD)/core/nmea_parser.o \
+		$(BUILD)/core/nmea.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test: $(TEST_TARGETS)
 	@for test_program in $(TEST_TARGETS); do ./$$test_program || exit 1; done
 
@@ -111,6 +116,11 @@ $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_wr
 $(BUILD)/test_nmea_tsan: tests/test_nmea.c tests/check.h core/nmea.c core/nmea.h
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_nmea.c core/nmea.c
+
+$(BUILD)/test_nmea_parser_tsan: tests/test_nmea_parser.c tests/check.h core/nmea_parser.c \
+		core/nmea_parser.h core/nmea.c core/nmea.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_nmea_parser.c core/nmea_parser.c core/nmea.c
 
 test-tsan: $(TSAN_TARGETS)
 	@for test_program in $(TSAN_TARGETS); do ./$$test_program || exit 1; done
