@@ -15,15 +15,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "io_util.h"
 
 #define SAMPLE_PERIOD_MS 10
 #define NSEC_PER_MSEC 1000000L
 #define NSEC_PER_SEC 1000000000L
-
-/* Повертає 0, якщо байти записано повністю, інакше -1 (errno виставлено). */
-static int write_all(int fd, const void *data, size_t length);
 
 /* Додає до моменту часу період відліку. Абсолютні моменти не накопичують затримку циклу. */
 static void advance_deadline(struct timespec *deadline);
@@ -54,9 +54,10 @@ int main(int argc, char **argv)
 
 	for (sent = 0; limit == 0 || sent < limit; sent++) {
 		int32_t value = (int32_t)sent;
+		int result = write_all(STDOUT_FILENO, &value, sizeof(value));
 
-		if (write_all(STDOUT_FILENO, &value, sizeof(value)) < 0) {
-			perror("sensor_sim: write");
+		if (result < 0) {
+			fprintf(stderr, "sensor_sim: write: %s\n", strerror(-result));
 			return EXIT_FAILURE;
 		}
 
@@ -67,26 +68,6 @@ int main(int argc, char **argv)
 	}
 
 	return EXIT_SUCCESS;
-}
-
-static int write_all(int fd, const void *data, size_t length)
-{
-	const char *cursor = data;
-
-	while (length > 0) {
-		ssize_t written = write(fd, cursor, length);
-
-		if (written < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			return -1;
-		}
-		cursor += written;
-		length -= (size_t)written;
-	}
-
-	return 0;
 }
 
 static void advance_deadline(struct timespec *deadline)

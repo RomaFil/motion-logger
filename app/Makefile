@@ -37,7 +37,7 @@ OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
 # Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
 SIM_TARGET := $(BUILD)/sensor_sim
-SIM_OBJS := $(BUILD)/tools/sensor_sim.o
+SIM_OBJS := $(BUILD)/tools/sensor_sim.o $(BUILD)/core/io_util.o
 
 # Тести: окремі програми з тих самих core-файлів (без main.c), запускаються командою make test.
 TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader
