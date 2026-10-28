@@ -3,18 +3,29 @@
  * @brief Окремий потік: забирає записи з кільцевого буфера й дописує в лог-файл те, що важливо.
  *
  * Один рядок файлу це один запис у форматі JSON (так файл легко читає і людина, і програма).
- * Є два види рядків, залежно від того, звідки взято запис (поле source у struct sample):
+ * Види рядків залежать від того, звідки взято запис (поле source у struct sample):
  *
  *   імітатор (SAMPLE_SOURCE_SIM), кожне число окремим рядком:
  *     {"t_ms":123456,"src":"sim","value":42}
  *
- *   акселерометр (SAMPLE_SOURCE_ACCEL): рядок лише тоді, коли змінився стан руху.
+ *   основний акселерометр (SAMPLE_SOURCE_ACCEL): подія, коли змінився стан руху, і підсумок
+ *   кожної секунди (рухалась плата більшу частину секунди чи ні, середнє відхилення в g):
  *     {"t_ms":20550,"src":"accel","event":"MOVE_START"}
  *     {"t_ms":40550,"src":"accel","event":"MOVE_STOP"}
+ *     {"t_ms":21000,"src":"accel","second":20,"moving":true,"avg_dev_g":0.2105}
  *
- * Чому для акселерометра не кожен відлік: 100 рядків на секунду це 6 КБ/с, години логу,
- * з якого людині треба вручну витягувати «коли я йшов». Подій у журналі достатньо; сирі
- * відліки при потребі лежать у CSV-записі (формат accel_csv).
+ *   додатковий акселерометр (SAMPLE_SOURCE_ACCEL2), не частіше одного рядка на секунду:
+ *     {"t_ms":21000,"src":"accel2","x_g":0.0123,"y_g":-0.0042,"z_g":0.9987}
+ *
+ *   GPS (SAMPLE_SOURCE_GPS), по рядку на кожен рядок RMC від модуля (раз на секунду):
+ *     {"t_ms":21000,"src":"gps","fix":true,"lat":50.450100,"lon":30.523400,"speed_knots":0.30,"sats":8}
+ *     {"t_ms":3000,"src":"gps","fix":false,"sats":0}
+ *   без фіксації координат нема взагалі (нульову широту не можна приймати за реальну точку);
+ *   sats дорівнює null, якщо рядка GGA ще не було.
+ *
+ * Чому для основного акселерометра не кожен відлік: 100 рядків на секунду це 6 КБ/с, години
+ * логу, з якого людині треба вручну витягувати «коли я йшов». Подій і підсумку секунди досить;
+ * сирі відліки при потребі лежать у CSV-записі (формат accel_csv).
  *
  * Рух визначає фільтр (motion_filter + motion_events), параметри беруться з
  * motion_defaults.h. Це ті самі модулі, що й в analyze_recording, тому лог і звіт збігаються.
@@ -43,12 +54,15 @@
 #define LOG_WRITER_SOURCE_SIZE 16
 
 /** @brief Найбільша довжина одного рядка логу разом із завершальним нулем. */
-#define LOG_WRITER_LINE_SIZE 80
+#define LOG_WRITER_LINE_SIZE 192
 
 /** @brief Підсумок роботи записувача. */
 struct log_writer_stats {
-	size_t written; /**< скільки рядків записано в файл (числа імітатора і події руху разом) */
+	size_t written; /**< скільки рядків записано в файл (усіх видів разом) */
 	size_t events;	/**< з них скільки рядків-подій руху */
+	size_t rows;	/**< з них скільки підсумків секунди основного акселерометра */
+	size_t aux;	/**< з них скільки рядків додаткового акселерометра */
+	size_t gps;	/**< з них скільки рядків GPS */
 	size_t failed;	/**< скільки записів не вдалося обробити чи записати */
 };
 
@@ -56,6 +70,8 @@ struct log_writer_stats {
 struct log_writer {
 	struct ring_buffer *source_buffer;
 	struct motion_report detector;
+	int64_t last_aux_ms; /**< мітка часу останнього записаного рядка accel2 */
+	bool aux_seen;	     /**< чи писали вже рядок accel2 */
 	int fd;
 	pthread_t thread;
 	atomic_bool stop_requested;
@@ -89,6 +105,38 @@ int log_writer_format_line(char *out, size_t size, const char *source, int64_t t
  *         (MOTION_EVENT_NONE); -ENOSPC, якщо рядок не влізає в size
  */
 int log_writer_format_event(char *out, size_t size, int64_t timestamp_ms, enum motion_event event);
+
+/**
+ * @brief Складає рядок-підсумок секунди основного акселерометра.
+ *
+ * @param out          куди писати
+ * @param size         розмір масиву out у байтах
+ * @param timestamp_ms мітка часу в мілісекундах
+ * @param row          підсумок секунди з motion_report
+ * @return довжина рядка без завершального нуля; -EINVAL, якщо out чи row NULL або середнє
+ *         відхилення не скінченне число; -ENOSPC, якщо рядок не влізає в size
+ */
+int log_writer_format_row(char *out, size_t size, int64_t timestamp_ms,
+			  const struct motion_report_row *row);
+
+/**
+ * @brief Складає рядок додаткового акселерометра (осі в g).
+ *
+ * @return довжина рядка без завершального нуля; -EINVAL, якщо out NULL або будь-яка вісь не
+ *         скінченна; -ENOSPC, якщо рядок не влізає в size
+ */
+int log_writer_format_aux(char *out, size_t size, int64_t timestamp_ms, double x_g, double y_g,
+			  double z_g);
+
+/**
+ * @brief Складає рядок GPS з запису SAMPLE_SOURCE_GPS.
+ *
+ * Без фіксації (gps_fix = false) координат у рядку нема. satellites менше нуля дає null.
+ *
+ * @return довжина рядка без завершального нуля; -EINVAL, якщо out чи sample NULL, source не GPS
+ *         або координати чи швидкість не скінченні; -ENOSPC, якщо рядок не влізає в size
+ */
+int log_writer_format_gps(char *out, size_t size, const struct sample *sample);
 
 /**
  * @brief Відкриває лог-файл і запускає потік, що забирає записи з буфера.

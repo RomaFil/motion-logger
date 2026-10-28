@@ -1,0 +1,96 @@
+#!/bin/sh
+# Наскрізна перевірка кроку 5.2: motion_logger читає три джерела одночасно, без справжнього заліза.
+#   --iio       фальшивий каталог IIO (звичайні файли in_accel_*_raw, in_accel_scale)
+#   --iio-aux   другий такий каталог
+#   --gps       іменований канал (FIFO), у який подано рядки NMEA з tests/data/gps_sample.nmea
+# Після кількох секунд роботи програма отримує SIGTERM. У лозі мають бути рядки accel, accel2
+# і gps, а підсумок не має містити втрат і помилок запису.
+# Лише POSIX sh. Запуск: sh tests/check_sources.sh build/motion_logger tests/data
+
+set -eu
+
+APP=$1
+DATA=$2
+
+# Скільки секунд працює програма: з розрахунком на хоча б дві межі секунди у фільтрі руху.
+RUN_SECONDS=3
+# Рядків RMC у файлі NMEA: стільки ж рядків gps очікуємо в лозі.
+RMC_LINES=$(grep -c 'RMC' "$DATA/gps_sample.nmea")
+
+WORK=$(mktemp -d /tmp/check_sources_XXXXXX)
+PID=
+cleanup() {
+	if [ -n "$PID" ]; then
+		kill -KILL "$PID" 2> /dev/null || true
+	fi
+	rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+fail() {
+	echo "check_sources: FAIL $1"
+	exit 1
+}
+
+# Каталог пристрою IIO зі спільним масштабом 9,80665 (одна одиниця raw це рівно 1 g).
+make_iio() {
+	mkdir "$1"
+	printf '%s\n' "$2" > "$1/in_accel_x_raw"
+	printf '%s\n' "$3" > "$1/in_accel_y_raw"
+	printf '%s\n' "$4" > "$1/in_accel_z_raw"
+	printf '9.80665\n' > "$1/in_accel_scale"
+}
+
+make_iio "$WORK/main" 0 0 1
+make_iio "$WORK/aux" 0 0 1
+mkfifo "$WORK/gps"
+LOG="$WORK/log.jsonl"
+SUMMARY="$WORK/summary.txt"
+
+# Відкриваємо канал на читання й запис одразу: поки ми його тримаємо, читач не побачить кінця даних.
+exec 3<> "$WORK/gps"
+
+"$APP" --iio "$WORK/main" --iio-aux "$WORK/aux" --gps "$WORK/gps" --log "$LOG" > "$SUMMARY" &
+PID=$!
+
+cat "$DATA/gps_sample.nmea" >&3
+sleep "$RUN_SECONDS"
+
+kill -TERM "$PID"
+STATUS=0
+wait "$PID" || STATUS=$?
+PID=
+exec 3>&-
+
+[ "$STATUS" -eq 0 ] || fail "motion_logger exited with status $STATUS after SIGTERM"
+
+count_lines() {
+	grep -c "$1" "$LOG" || true
+}
+
+ACCEL_ROWS=$(count_lines '"src":"accel","second"')
+AUX_LINES=$(count_lines '"src":"accel2"')
+GPS_LINES=$(count_lines '"src":"gps"')
+GPS_FIX_LINES=$(count_lines '"src":"gps","fix":true,"lat":50.450100,"lon":30.523400')
+GPS_NO_FIX_LINES=$(count_lines '"src":"gps","fix":false')
+
+[ "$ACCEL_ROWS" -ge 1 ] || fail "no per-second accel rows in the log"
+[ "$AUX_LINES" -ge 1 ] || fail "no accel2 lines in the log"
+[ "$GPS_LINES" -eq "$RMC_LINES" ] || fail "expected $RMC_LINES gps lines, got $GPS_LINES"
+[ "$GPS_FIX_LINES" -ge 1 ] || fail "no gps line with the fix position 50.450100,30.523400"
+[ "$GPS_NO_FIX_LINES" -ge 1 ] || fail "no gps line without a fix"
+
+# Один акселерометр лежить нерухомо на столі: жодної події руху.
+[ "$(count_lines '"event":')" -eq 0 ] || fail "motion events for a board lying still"
+
+# Додатковий акселерометр: не більше рядка на секунду і значення z = 1 g.
+[ "$AUX_LINES" -le $((RUN_SECONDS + 1)) ] || fail "accel2 is written more than once per second"
+grep -q '"src":"accel2","x_g":0.0000,"y_g":0.0000,"z_g":1.0000' "$LOG" ||
+	fail "accel2 line has unexpected values"
+
+case "$(cat "$SUMMARY")" in
+*"dropped 0,"*"log errors 0,"*) ;;
+*) fail "unexpected summary: $(cat "$SUMMARY")" ;;
+esac
+
+echo "check_sources: ok, $ACCEL_ROWS accel rows, $AUX_LINES accel2, $GPS_LINES gps lines"

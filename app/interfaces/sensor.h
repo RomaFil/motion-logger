@@ -14,6 +14,7 @@
 #ifndef SENSOR_H
 #define SENSOR_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /** @brief Один відлік акселерометра. */
@@ -36,17 +37,24 @@ enum sample_source {
 /**
  * @brief Запис, який іде через кільцевий буфер від джерела до записувача логу.
  *
- * Поле source каже, які з решти полів мають зміст: для SIM заповнено value, для ACCEL
- * заповнено x_g, y_g, z_g. Решта полів нулі. Мітка часу ставиться там, де відлік
- * з'явився (а не в момент запису в файл), тому затримка в буфері не псує час.
+ * Поле source каже, які з решти полів мають зміст: для SIM заповнено value, для ACCEL і ACCEL2
+ * заповнено x_g, y_g, z_g, для GPS заповнено gps_fix, latitude_deg, longitude_deg, speed_knots,
+ * satellites. Решта полів нулі. Мітка часу ставиться там, де відлік з'явився (а не в момент
+ * запису в файл), тому затримка в буфері не псує час.
  */
 struct sample {
 	enum sample_source source;
 	int64_t time_ms; /**< момент відліку, мілісекунди */
 	int32_t value;	 /**< число імітатора (лише SAMPLE_SOURCE_SIM) */
-	double x_g;	 /**< (лише SAMPLE_SOURCE_ACCEL) */
+	double x_g;	 /**< (лише ACCEL і ACCEL2) */
 	double y_g;
 	double z_g;
+	bool gps_fix;	      /**< (лише GPS) чи модуль вважає позицію дійсною (RMC статус A) */
+	double latitude_deg;  /**< (лише GPS, коли gps_fix) десяткові градуси, південь мінусом */
+	double longitude_deg; /**< (лише GPS, коли gps_fix) десяткові градуси, захід мінусом */
+	double speed_knots;   /**< (лише GPS, коли gps_fix) вузли */
+	int satellites; /**< (лише GPS) скільки супутників у останньому GGA, або -1, якщо ще не було
+			 */
 };
 
 /**

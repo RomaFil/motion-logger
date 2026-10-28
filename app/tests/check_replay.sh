@@ -43,11 +43,12 @@ if ! diff -u "$EXPECTED" "$ACTUAL" > /dev/null; then
 	exit 1
 fi
 
-# Лог містить лише події (сирі відліки в нього не йдуть) і нічого не загублено.
+# У лозі події та підсумки секунд, сирих відліків нема, і нічого не загублено.
 LINES=$(wc -l < "$LOG" | tr -d ' ')
 EVENTS=$(wc -l < "$EXPECTED" | tr -d ' ')
-if [ "$LINES" != "$EVENTS" ]; then
-	echo "check_replay: FAIL log has $LINES lines, expected $EVENTS (events only)"
+ROWS=$(grep -c '^{"t_ms":[0-9]*,"src":"accel","second":[0-9]*,"moving":\(true\|false\),"avg_dev_g":[0-9.]*}$' "$LOG" || true)
+if [ "$ROWS" -lt 1 ] || [ "$LINES" != "$((EVENTS + ROWS))" ]; then
+	echo "check_replay: FAIL log has $LINES lines, expected $EVENTS events + per-second rows (found $ROWS)"
 	exit 1
 fi
 case "$SUMMARY" in

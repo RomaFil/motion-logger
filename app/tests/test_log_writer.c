@@ -7,6 +7,7 @@
  * і видаляє сам.
  */
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
@@ -295,35 +296,82 @@ static size_t fill_still_moving_still(struct ring_buffer *rb, int64_t *moving_st
 	return total;
 }
 
-/* Читає лог і перевіряє: рівно два рядки, MOVE_START у межах руху, потім MOVE_STOP після нього. */
-static void check_start_then_stop(const char *path, int64_t moving_start_ms, int64_t moving_end_ms)
+/* Рядок-підсумок секунди: розбирає час, номер секунди й ознаку руху; false, якщо не схожий. */
+static bool parse_row_line(const char *line, long long *time_ms, long long *second, bool *moving)
+{
+	char flag[8];
+	double deviation;
+
+	if (sscanf(line,
+		   "{\"t_ms\":%lld,\"src\":\"accel\",\"second\":%lld,\"moving\":%7[a-z],"
+		   "\"avg_dev_g\":%lf}",
+		   time_ms, second, flag, &deviation) != 4) {
+		return false;
+	}
+	*moving = strcmp(flag, "true") == 0;
+
+	return *moving || strcmp(flag, "false") == 0;
+}
+
+/*
+ * Читає лог і перевіряє: серед рядків рівно дві події (MOVE_START у межах руху, потім MOVE_STOP
+ * після нього), решта це підсумки секунд з номерами по порядку; під час руху є рядок moving:true.
+ * Повертає кількість рядків-підсумків.
+ */
+static size_t check_start_then_stop(const char *path, int64_t moving_start_ms,
+				    int64_t moving_end_ms)
 {
 	char line[LOG_WRITER_LINE_SIZE];
 	char name[LOG_WRITER_SOURCE_SIZE];
+	long long time_ms;
+	long long second;
+	long long previous_second = -1;
 	long long start_ms = -1;
 	long long stop_ms = -1;
+	bool moving;
+	bool saw_moving_row = false;
+	size_t rows = 0;
+	size_t events = 0;
 	FILE *file = fopen(path, "r");
 
 	CHECK(file != NULL);
 	if (file == NULL) {
-		return;
+		return 0;
 	}
 
-	CHECK(fgets(line, sizeof(line), file) != NULL);
-	CHECK(parse_event_line(line, &start_ms, name, sizeof(name)));
-	CHECK(strcmp(name, "MOVE_START") == 0);
-	CHECK(start_ms > moving_start_ms && start_ms < moving_end_ms);
-
-	CHECK(fgets(line, sizeof(line), file) != NULL);
-	CHECK(parse_event_line(line, &stop_ms, name, sizeof(name)));
-	CHECK(strcmp(name, "MOVE_STOP") == 0);
-	CHECK(stop_ms > moving_end_ms);
-
-	CHECK(fgets(line, sizeof(line), file) == NULL); /* більше нічого: відліки в лог не йдуть */
+	while (fgets(line, sizeof(line), file) != NULL) {
+		if (parse_event_line(line, &time_ms, name, sizeof(name))) {
+			if (strcmp(name, "MOVE_START") == 0) {
+				CHECK(events == 0);
+				start_ms = time_ms;
+			} else {
+				CHECK(strcmp(name, "MOVE_STOP") == 0);
+				CHECK(events == 1);
+				stop_ms = time_ms;
+			}
+			events++;
+		} else {
+			CHECK(parse_row_line(line, &time_ms, &second, &moving));
+			CHECK(second == previous_second + 1);
+			previous_second = second;
+			saw_moving_row = saw_moving_row || moving;
+			rows++;
+		}
+	}
 	fclose(file);
+
+	CHECK(events == 2);
+	CHECK(start_ms > moving_start_ms && start_ms < moving_end_ms);
+	CHECK(stop_ms > moving_end_ms);
+	CHECK(saw_moving_row);
+
+	return rows;
 }
 
-/* Головна перевірка кроку 5.3: «стою, іду, стою» дає в лозі рівно MOVE_START і MOVE_STOP. */
+/*
+ * Головна перевірка кроку 5.3: «стою, іду, стою» дає в лозі рівно MOVE_START і MOVE_STOP, а між
+ * ними підсумки секунд. Остання секунда ще не закрита, тому підсумків на один менше за секунди.
+ */
 static void test_accel_samples_produce_start_and_stop_events(void)
 {
 	static struct sample
@@ -334,6 +382,7 @@ static void test_accel_samples_produce_start_and_stop_events(void)
 	int64_t moving_start_ms;
 	int64_t moving_end_ms;
 	size_t samples;
+	size_t rows;
 	char path[TEMP_PATH_SIZE];
 
 	make_temp_path(path);
@@ -344,11 +393,13 @@ static void test_accel_samples_produce_start_and_stop_events(void)
 	CHECK(log_writer_start(&lw, &rb, path) == 0);
 	CHECK(log_writer_stop(&lw, &stats) == 0);
 
-	CHECK(stats.written == 2);
 	CHECK(stats.events == 2);
+	CHECK(stats.rows == STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS - 1);
+	CHECK(stats.written == stats.events + stats.rows);
 	CHECK(stats.failed == 0);
 	CHECK(ring_buffer_is_empty(&rb));
-	check_start_then_stop(path, moving_start_ms, moving_end_ms);
+	rows = check_start_then_stop(path, moving_start_ms, moving_end_ms);
+	CHECK(rows == stats.rows);
 
 	ring_buffer_destroy(&rb);
 	unlink(path);
@@ -441,6 +492,216 @@ static void test_sim_sample_keeps_its_own_timestamp(void)
 	unlink(path);
 }
 
+static void test_format_row_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct motion_report_row row = {.second = 20,
+					.samples = 100,
+					.moving_samples = 90,
+					.moving = true,
+					.average_deviation_g = 0.21051};
+
+	CHECK(log_writer_format_row(line, sizeof(line), 21000, &row) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"accel\",\"second\":20,\"moving\":true,"
+			   "\"avg_dev_g\":0.2105}\n") == 0);
+
+	row.moving = false;
+	row.average_deviation_g = 0.0;
+	CHECK(log_writer_format_row(line, sizeof(line), 3000, &row) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":3000,\"src\":\"accel\",\"second\":20,\"moving\":false,"
+			   "\"avg_dev_g\":0.0000}\n") == 0);
+}
+
+static void test_format_row_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+	struct motion_report_row row = {.second = 1, .average_deviation_g = 0.1};
+
+	CHECK(log_writer_format_row(NULL, sizeof(line), 0, &row) == -EINVAL);
+	CHECK(log_writer_format_row(line, sizeof(line), 0, NULL) == -EINVAL);
+	CHECK(log_writer_format_row(tiny, sizeof(tiny), 0, &row) == -ENOSPC);
+	row.average_deviation_g = NAN;
+	CHECK(log_writer_format_row(line, sizeof(line), 0, &row) == -EINVAL);
+}
+
+static void test_format_aux_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+
+	CHECK(log_writer_format_aux(line, sizeof(line), 21000, 0.0123, -0.0042, 0.9987) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"accel2\",\"x_g\":0.0123,\"y_g\":-0.0042,"
+			   "\"z_g\":0.9987}\n") == 0);
+}
+
+static void test_format_aux_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+
+	CHECK(log_writer_format_aux(NULL, sizeof(line), 0, 0, 0, 1) == -EINVAL);
+	CHECK(log_writer_format_aux(tiny, sizeof(tiny), 0, 0, 0, 1) == -ENOSPC);
+	CHECK(log_writer_format_aux(line, sizeof(line), 0, NAN, 0, 1) == -EINVAL);
+	CHECK(log_writer_format_aux(line, sizeof(line), 0, 0, INFINITY, 1) == -EINVAL);
+	CHECK(log_writer_format_aux(line, sizeof(line), 0, 0, 0, -INFINITY) == -EINVAL);
+}
+
+static struct sample make_gps_item(int64_t time_ms, bool fix, int satellites)
+{
+	struct sample item = {.source = SAMPLE_SOURCE_GPS,
+			      .time_ms = time_ms,
+			      .gps_fix = fix,
+			      .satellites = satellites};
+
+	if (fix) {
+		item.latitude_deg = 50.4501;
+		item.longitude_deg = 30.5234;
+		item.speed_knots = 0.3;
+	}
+
+	return item;
+}
+
+static void test_format_gps_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gps_item(21000, true, 8);
+
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gps\",\"fix\":true,\"lat\":50.450100,"
+			   "\"lon\":30.523400,\"speed_knots\":0.30,\"sats\":8}\n") == 0);
+
+	/* Південь і захід: мінус зберігається. */
+	item.latitude_deg = -33.8688;
+	item.longitude_deg = -70.6693;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strstr(line, "\"lat\":-33.868800,\"lon\":-70.669300") != NULL);
+}
+
+/* Без фіксації координат у рядку нема зовсім; невідома кількість супутників це null, а не 0. */
+static void test_format_gps_without_fix_has_no_coordinates(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gps_item(3000, false, 0);
+
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":3000,\"src\":\"gps\",\"fix\":false,\"sats\":0}\n") == 0);
+
+	item.satellites = -1;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":3000,\"src\":\"gps\",\"fix\":false,\"sats\":null}\n") == 0);
+	CHECK(strstr(line, "lat") == NULL);
+}
+
+static void test_format_gps_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+	struct sample item = make_gps_item(0, true, 5);
+	struct sample not_gps = make_sim_sample(1);
+
+	CHECK(log_writer_format_gps(NULL, sizeof(line), &item) == -EINVAL);
+	CHECK(log_writer_format_gps(line, sizeof(line), NULL) == -EINVAL);
+	CHECK(log_writer_format_gps(line, sizeof(line), &not_gps) == -EINVAL);
+	CHECK(log_writer_format_gps(tiny, sizeof(tiny), &item) == -ENOSPC);
+	item.latitude_deg = NAN;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) == -EINVAL);
+}
+
+/* Додатковий акселерометр на 100 Гц дає в лог не більше рядка на секунду, перший відлік одразу. */
+static void test_aux_samples_are_written_once_per_second(void)
+{
+	struct sample storage[ACCEL_RATE_HZ * 3];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	char path[TEMP_PATH_SIZE];
+	int64_t time_ms;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	for (time_ms = 0; time_ms < 2500; time_ms += MS_PER_SAMPLE) {
+		struct sample item = {
+		    .source = SAMPLE_SOURCE_ACCEL2, .time_ms = time_ms, .z_g = 1.0};
+
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.aux == 3); /* t = 0, 1000, 2000 */
+	CHECK(stats.written == 3);
+	CHECK(stats.failed == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Кожен запис GPS іде в лог окремим рядком у тому порядку, в якому прийшов. */
+static void test_gps_samples_are_written_in_order(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct sample item;
+	char path[TEMP_PATH_SIZE];
+	char line[LOG_WRITER_LINE_SIZE];
+	FILE *file;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	item = make_gps_item(1000, false, -1);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+	item = make_gps_item(2000, true, 7);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.gps == 2);
+	CHECK(stats.written == 2);
+	file = fopen(path, "r");
+	CHECK(file != NULL);
+	if (file != NULL) {
+		CHECK(fgets(line, sizeof(line), file) != NULL);
+		CHECK(strstr(line, "\"t_ms\":1000,\"src\":\"gps\",\"fix\":false") != NULL);
+		CHECK(fgets(line, sizeof(line), file) != NULL);
+		CHECK(strstr(line, "\"t_ms\":2000,\"src\":\"gps\",\"fix\":true") != NULL);
+		CHECK(fgets(line, sizeof(line), file) == NULL);
+		fclose(file);
+	}
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Запис з невідомим джерелом не губиться мовчки: його видно в лічильнику помилок. */
+static void test_unknown_source_counts_as_failed(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct sample item = make_sim_sample(1);
+	char path[TEMP_PATH_SIZE];
+
+	item.source = (enum sample_source)99;
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.failed == 1);
+	CHECK(stats.written == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 int main(void)
 {
 	test_format_line_produces_exact_json();
@@ -456,6 +717,16 @@ int main(void)
 	test_accel_sample_with_decreasing_time_counts_as_failed();
 	test_sim_and_accel_samples_share_the_log();
 	test_sim_sample_keeps_its_own_timestamp();
+	test_format_row_produces_exact_json();
+	test_format_row_rejects_bad_input();
+	test_format_aux_produces_exact_json();
+	test_format_aux_rejects_bad_input();
+	test_format_gps_produces_exact_json();
+	test_format_gps_without_fix_has_no_coordinates();
+	test_format_gps_rejects_bad_input();
+	test_aux_samples_are_written_once_per_second();
+	test_gps_samples_are_written_in_order();
+	test_unknown_source_counts_as_failed();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);

@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -25,6 +26,12 @@
 /* Ім'я джерела в рядках логу. Лише a-z, 0-9, _: воно йде в JSON без екранування. */
 #define SIM_SOURCE_NAME "sim"
 #define ACCEL_SOURCE_NAME "accel"
+#define ACCEL2_SOURCE_NAME "accel2"
+#define GPS_SOURCE_NAME "gps"
+
+/* Додатковий акселерометр пишемо не частіше за цей інтервал: 100 відліків на секунду в лог не
+ * потрібні. */
+#define AUX_PERIOD_MS 1000
 
 #define LOG_FILE_MODE 0644
 
@@ -34,6 +41,8 @@ static void *run_writer_thread(void *argument);
 static void handle_sample(struct log_writer *lw, const struct sample *item);
 static void write_sim_sample(struct log_writer *lw, const struct sample *item);
 static void write_accel_sample(struct log_writer *lw, const struct sample *item);
+static void write_aux_sample(struct log_writer *lw, const struct sample *item);
+static void write_gps_sample(struct log_writer *lw, const struct sample *item);
 static void write_line(struct log_writer *lw, const char *line, int length);
 static void sleep_idle(void);
 
@@ -81,6 +90,83 @@ int log_writer_format_event(char *out, size_t size, int64_t timestamp_ms, enum m
 	return length;
 }
 
+int log_writer_format_row(char *out, size_t size, int64_t timestamp_ms,
+			  const struct motion_report_row *row)
+{
+	int length;
+
+	if (out == NULL || row == NULL || !isfinite(row->average_deviation_g)) {
+		return -EINVAL;
+	}
+
+	length = snprintf(out, size,
+			  "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"second\":%" PRId64
+			  ",\"moving\":%s,\"avg_dev_g\":%.4f}\n",
+			  timestamp_ms, ACCEL_SOURCE_NAME, row->second,
+			  row->moving ? "true" : "false", row->average_deviation_g);
+	if (length < 0 || (size_t)length >= size) {
+		return -ENOSPC;
+	}
+
+	return length;
+}
+
+int log_writer_format_aux(char *out, size_t size, int64_t timestamp_ms, double x_g, double y_g,
+			  double z_g)
+{
+	int length;
+
+	if (out == NULL || !isfinite(x_g) || !isfinite(y_g) || !isfinite(z_g)) {
+		return -EINVAL;
+	}
+
+	length = snprintf(out, size,
+			  "{\"t_ms\":%" PRId64
+			  ",\"src\":\"%s\",\"x_g\":%.4f,\"y_g\":%.4f,\"z_g\":%.4f}\n",
+			  timestamp_ms, ACCEL2_SOURCE_NAME, x_g, y_g, z_g);
+	if (length < 0 || (size_t)length >= size) {
+		return -ENOSPC;
+	}
+
+	return length;
+}
+
+int log_writer_format_gps(char *out, size_t size, const struct sample *sample)
+{
+	char sats[16];
+	int length;
+
+	if (out == NULL || sample == NULL || sample->source != SAMPLE_SOURCE_GPS) {
+		return -EINVAL;
+	}
+	if (sample->satellites < 0) {
+		snprintf(sats, sizeof(sats), "null");
+	} else {
+		snprintf(sats, sizeof(sats), "%d", sample->satellites);
+	}
+
+	if (!sample->gps_fix) {
+		length = snprintf(
+		    out, size, "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"fix\":false,\"sats\":%s}\n",
+		    sample->time_ms, GPS_SOURCE_NAME, sats);
+	} else if (!isfinite(sample->latitude_deg) || !isfinite(sample->longitude_deg) ||
+		   !isfinite(sample->speed_knots)) {
+		return -EINVAL;
+	} else {
+		length = snprintf(out, size,
+				  "{\"t_ms\":%" PRId64
+				  ",\"src\":\"%s\",\"fix\":true,\"lat\":%.6f,\"lon\":%.6f,"
+				  "\"speed_knots\":%.2f,\"sats\":%s}\n",
+				  sample->time_ms, GPS_SOURCE_NAME, sample->latitude_deg,
+				  sample->longitude_deg, sample->speed_knots, sats);
+	}
+	if (length < 0 || (size_t)length >= size) {
+		return -ENOSPC;
+	}
+
+	return length;
+}
+
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path)
 {
 	int error;
@@ -103,6 +189,8 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 	}
 
 	lw->source_buffer = rb;
+	lw->aux_seen = false;
+	lw->last_aux_ms = 0;
 	memset(&lw->stats, 0, sizeof(lw->stats));
 	atomic_init(&lw->stop_requested, false);
 
@@ -201,6 +289,12 @@ static void handle_sample(struct log_writer *lw, const struct sample *item)
 	case SAMPLE_SOURCE_ACCEL:
 		write_accel_sample(lw, item);
 		break;
+	case SAMPLE_SOURCE_ACCEL2:
+		write_aux_sample(lw, item);
+		break;
+	case SAMPLE_SOURCE_GPS:
+		write_gps_sample(lw, item);
+		break;
 	default:
 		lw->stats.failed++; /* невідоме джерело: краще порахувати, ніж мовчки загубити */
 		break;
@@ -217,7 +311,8 @@ static void write_sim_sample(struct log_writer *lw, const struct sample *item)
 	write_line(lw, line, length);
 }
 
-/* Відлік акселерометра: у лог іде лише подія «рух почався / закінчився», сам відлік ні. */
+/* Відлік основного акселерометра: у лог іде підсумок секунди й подія «рух почався / закінчився»,
+ * сам відлік ні. */
 static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 {
 	struct accel_sample accel = {
@@ -230,6 +325,13 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 		lw->stats.failed++; /* час спадає або число не скінченне: відлік відкинуто */
 		return;
 	}
+	if (update.row_ready) {
+		length = log_writer_format_row(line, sizeof(line), item->time_ms, &update.row);
+		write_line(lw, line, length);
+		if (length >= 0) {
+			lw->stats.rows++;
+		}
+	}
 	if (update.event == MOTION_EVENT_NONE) {
 		return;
 	}
@@ -238,6 +340,38 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 	write_line(lw, line, length);
 	if (length >= 0) {
 		lw->stats.events++;
+	}
+}
+
+/* Додатковий акселерометр: не частіше одного рядка на AUX_PERIOD_MS за мітками часу відліків. */
+static void write_aux_sample(struct log_writer *lw, const struct sample *item)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	int length;
+
+	if (lw->aux_seen && item->time_ms - lw->last_aux_ms < AUX_PERIOD_MS) {
+		return;
+	}
+
+	length = log_writer_format_aux(line, sizeof(line), item->time_ms, item->x_g, item->y_g,
+				       item->z_g);
+	write_line(lw, line, length);
+	if (length >= 0) {
+		lw->stats.aux++;
+		lw->aux_seen = true;
+		lw->last_aux_ms = item->time_ms;
+	}
+}
+
+/* GPS: один рядок на кожен рядок RMC від модуля. */
+static void write_gps_sample(struct log_writer *lw, const struct sample *item)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	int length = log_writer_format_gps(line, sizeof(line), item);
+
+	write_line(lw, line, length);
+	if (length >= 0) {
+		lw->stats.gps++;
 	}
 }
 
