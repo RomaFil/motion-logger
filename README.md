@@ -44,7 +44,39 @@
     make O=../build-pi5 BR2_EXTERNAL=/шлях/до/цього/репозиторію motion_logger_defconfig
     cd ../build-pi5 && make
 
-Образ: `build-pi5/images/sdcard.img`.
+Образ: `build-pi5/images/sdcard.img`. Запис на картку: `dd if=sdcard.img of=/dev/sdX bs=4M conv=fsync`
+(перевірте `X`: помилка зітре чужий диск). Повну збірку з нуля чекайте близько 1,5 години; після зміни лише
+застосунку досить `make motion_logger-rebuild && make` (див. `CHANGELOG.md`).
+
+## Схема підключення (плата Motion Logger на Raspberry Pi 5)
+
+Нумерація пінів фізична (гребінка 40-pin); живлення модулів 3,3 В з пінів 1 і 17. Детальна схема й PCB
+лежать в проєкті Altium (поза цим репозиторієм).
+
+| Модуль | Шина | Пін Pi (GPIO) | Пін модуля |
+|---|---|---|---|
+| GY-87 / HW-290 (MPU6050 `0x68`, HMC5883L `0x1E`, BMP180 `0x77`) | I2C1 | 3 (GPIO2 SDA), 5 (GPIO3 SCL) | SDA, SCL |
+| GY-291 (ADXL345) | SPI0, CE0 | 19 (GPIO10 MOSI), 21 (GPIO9 MISO), 23 (GPIO11 SCLK), 24 (GPIO8 CE0) | SDA, SDO, SCL, CS |
+| NEO-6M (HW-623) | UART2 | 7 (GPIO4 TX), 29 (GPIO5 RX) | RXD, TXD (навхрест) |
+| Кнопки | GPIO | 11 (GPIO17), 33 (GPIO13) | S |
+| Світлодіоди R / G / B | GPIO | 13 (GPIO27), 15 (GPIO22), 31 (GPIO6) | через резистор 220 / 100 / 100 Ом |
+| Налагоджувальний UART `DBG1` | UART0 | 8 (GPIO14 TX), 10 (GPIO15 RX) | USB-UART 3,3 В |
+
+## Підключення до плати і перевірка
+
+- Консоль: USB-UART 3,3 В на `DBG1` (115200 8N1; `picocom -b 115200 /dev/ttyUSB0`), TX адаптера на RX плати і навпаки.
+  Повідомлення ядра йдуть на роз'єм JST (`ttyAMA10`), на `DBG1` лише getty та вивід `S99motion_logger`.
+- Мережа: DHCP на `eth0`, SSH-сервер dropbear (користувач `root`, навчальний пароль задано в `configs/motion_logger_defconfig`;
+  у продуктовому образі його прибрати).
+- Автозапуск: `/etc/init.d/S99motion_logger {start|stop|restart|status}`, параметри в `/etc/default/motion_logger`.
+- Перевірка заліза в образі (потрібні `i2c_arm` і `spi` у `config.txt` та модулі з `/etc/modules-load.d/`):
+
+      i2cdetect -y 1        # очікується 68, 1e (після bypass), 77
+      ls /dev/spidev0.0     # ADXL345 (DEVID 0xE5, SPI mode 3)
+      gpiodetect; gpioinfo  # лінії кнопок і світлодіодів (libgpiod 1.6.5: gpioset gpiochip0 27=1)
+
+  Це список для **навчального** образу; у продуктовому `i2c-tools` і утиліти libgpiod прибирають.
+- Перевірка init-скрипта без плати: `sh board/motion_logger/tests/check_init_script.sh`.
 
 ## Імітатор датчика
 
