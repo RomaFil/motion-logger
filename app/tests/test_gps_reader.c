@@ -110,6 +110,33 @@ static void test_fix_sample_carries_position_and_satellites(void)
 	CHECK(item.time_ms > 0);
 	CHECK(ring_buffer_is_empty(&fx.rb));
 
+	/* Додаткові поля: дата й час UTC з RMC, курс, висота й HDOP з попереднього GGA. */
+	CHECK(item.has_utc);
+	CHECK(item.utc_epoch_s == 1793188808); /* 2026-10-28T12:00:08Z */
+	CHECK(item.has_course && fabs(item.course_deg - 90.0) < EPSILON);
+	CHECK(item.has_altitude && fabs(item.altitude_m - 180.0) < EPSILON);
+	CHECK(item.has_hdop && fabs(item.hdop - 1.2) < EPSILON);
+
+	fixture_destroy(&fx);
+}
+
+/* Без GGA перед RMC висоти й HDOP нема (прапорці false), а час і курс усе одно є. */
+static void test_fix_without_gga_has_no_altitude_or_hdop(void)
+{
+	struct fixture fx;
+	struct gps_reader_stats stats;
+	struct sample item;
+
+	fixture_init(&fx, BUFFER_CAPACITY);
+	feed_and_close(&fx, RMC_FIX "\n");
+	CHECK(run_reader(&fx, &stats) == 0);
+
+	CHECK(ring_buffer_pop(&fx.rb, &item) == 0);
+	CHECK(item.gps_fix);
+	CHECK(item.has_utc);
+	CHECK(!item.has_altitude);
+	CHECK(!item.has_hdop);
+
 	fixture_destroy(&fx);
 }
 
@@ -131,6 +158,9 @@ static void test_no_fix_sample_has_no_coordinates(void)
 	CHECK(fabs(item.latitude_deg) < EPSILON);
 	CHECK(fabs(item.longitude_deg) < EPSILON);
 	CHECK(item.satellites == -1);
+	/* Час і дата до фіксації модуль міг узяти зі своєї пам'яті: їм не вірять. */
+	CHECK(!item.has_utc);
+	CHECK(!item.has_course);
 
 	fixture_destroy(&fx);
 }
@@ -333,6 +363,7 @@ int main(void)
 {
 	test_rejects_bad_arguments();
 	test_fix_sample_carries_position_and_satellites();
+	test_fix_without_gga_has_no_altitude_or_hdop();
 	test_no_fix_sample_has_no_coordinates();
 	test_void_status_with_position_is_not_a_fix();
 	test_only_rmc_makes_samples();

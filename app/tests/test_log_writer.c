@@ -578,6 +578,62 @@ static void test_format_gps_produces_exact_json(void)
 	CHECK(strstr(line, "\"lat\":-33.868800,\"lon\":-70.669300") != NULL);
 }
 
+/* Додаткові поля йдуть після основних і лише відомі; без UTC чи висоти їх у рядку нема. */
+static void test_format_gps_with_optional_fields(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gps_item(21000, true, 8);
+
+	item.has_utc = true;
+	item.utc_epoch_s = 1793188808; /* 2026-10-28T12:00:08Z */
+	item.has_altitude = true;
+	item.altitude_m = 180.04;
+	item.has_course = true;
+	item.course_deg = 90.0;
+	item.has_hdop = true;
+	item.hdop = 1.2;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gps\",\"fix\":true,\"lat\":50.450100,"
+			   "\"lon\":30.523400,\"speed_knots\":0.30,\"sats\":8,"
+			   "\"utc\":\"2026-10-28T12:00:08Z\",\"alt_m\":180.0,\"course_deg\":90.0,"
+			   "\"hdop\":1.20}\n") == 0);
+
+	/* Лише висота: решта необов'язкових полів не з'являється. */
+	item.has_utc = false;
+	item.has_course = false;
+	item.has_hdop = false;
+	item.altitude_m = -12.5;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strstr(line, "\"sats\":8,\"alt_m\":-12.5}\n") != NULL);
+	CHECK(strstr(line, "utc") == NULL && strstr(line, "hdop") == NULL);
+}
+
+/* Найдовший можливий рядок GPS вміщається в LOG_WRITER_LINE_SIZE, а в малий буфер не лізе. */
+static void test_format_gps_longest_line_fits(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[64];
+	struct sample item = make_gps_item(INT64_C(9999999999999), true, 12);
+
+	item.latitude_deg = -89.999999;
+	item.longitude_deg = -179.999999;
+	item.speed_knots = 999.99;
+	item.has_utc = true;
+	item.utc_epoch_s = 4102444799LL;
+	item.has_altitude = true;
+	item.altitude_m = -9999.9;
+	item.has_course = true;
+	item.course_deg = 359.9;
+	item.has_hdop = true;
+	item.hdop = 99.99;
+
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(log_writer_format_gps(tiny, sizeof(tiny), &item) == -ENOSPC);
+
+	item.altitude_m = NAN;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) == -EINVAL);
+}
+
 /* Без фіксації координат у рядку нема зовсім; невідома кількість супутників це null, а не 0. */
 static void test_format_gps_without_fix_has_no_coordinates(void)
 {
@@ -723,6 +779,8 @@ int main(void)
 	test_format_aux_rejects_bad_input();
 	test_format_gps_produces_exact_json();
 	test_format_gps_without_fix_has_no_coordinates();
+	test_format_gps_with_optional_fields();
+	test_format_gps_longest_line_fits();
 	test_format_gps_rejects_bad_input();
 	test_aux_samples_are_written_once_per_second();
 	test_gps_samples_are_written_in_order();

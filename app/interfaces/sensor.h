@@ -55,6 +55,14 @@ struct sample {
 	double speed_knots;   /**< (лише GPS, коли gps_fix) вузли */
 	int satellites; /**< (лише GPS) скільки супутників у останньому GGA, або -1, якщо ще не було
 			 */
+	bool has_utc;	/**< (лише GPS, коли gps_fix) чи є дата й час UTC з рядка RMC */
+	int64_t utc_epoch_s; /**< секунди з 1970-01-01T00:00:00Z, коли has_utc */
+	bool has_course;     /**< (лише GPS, коли gps_fix) чи є курс */
+	double course_deg;   /**< курс відносно півночі, градуси */
+	bool has_altitude;   /**< (лише GPS, коли gps_fix) чи є висота з останнього GGA */
+	double altitude_m;   /**< висота над рівнем моря, метри */
+	bool has_hdop;	     /**< (лише GPS, коли gps_fix) чи є HDOP з останнього GGA */
+	double hdop;	     /**< горизонтальний розкид: чим менше, тим точніше (до 2 добре) */
 };
 
 /**

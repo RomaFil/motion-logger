@@ -239,8 +239,101 @@ static void test_null_arguments_are_rejected(void)
 	CHECK(nmea_parse_gga(GGA, NULL) == -EINVAL);
 }
 
+/* Курс і дата з RMC: 084,4° і 28.10.2026; двозначний рік це 2000 + yy. */
+static void test_rmc_course_and_date_are_parsed(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_rmc(
+		  make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,281026,003.1,W"),
+		  &fix) == 0);
+	CHECK(fix.has_course && nearly_equal(fix.course_degrees, 84.4));
+	CHECK(fix.has_date && fix.year == 2026 && fix.month == 10 && fix.day == 28);
+}
+
+/* Без фіксації курсу й дати може не бути: це нормально, прапорці лишаються false. */
+static void test_rmc_without_course_and_date(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,235947.00,V,,,,,,,,,,N"), &fix) == 0);
+	CHECK(!fix.has_course);
+	CHECK(!fix.has_date);
+
+	/* Короткий рядок без полів курсу й дати теж приймається. */
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4"), &fix) ==
+	      0);
+	CHECK(!fix.has_course && !fix.has_date);
+}
+
+static void test_rmc_bad_course_or_date_is_rejected(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_rmc(
+		  make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4,361.0,281026,,"),
+		  &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(
+		  make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4,84.4,321026,,"),
+		  &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(
+		  make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4,84.4,281326,,"),
+		  &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(
+		  make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4,84.4,28102,,"),
+		  &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(
+		  make_sentence("GPRMC,123519,A,4807.038,N,01131.000,E,022.4,84.4,2810x6,,"),
+		  &fix) == -EINVAL);
+}
+
+/* HDOP і висота з GGA; висота може бути від'ємною (нижче рівня моря). */
+static void test_gga_hdop_and_altitude(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_gga(GGA, &fix) == 0);
+	CHECK(fix.has_hdop && nearly_equal(fix.hdop, 0.9));
+	CHECK(fix.has_altitude && nearly_equal(fix.altitude_m, 545.4));
+
+	CHECK(nmea_parse_gga(
+		  make_sentence("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,-12.5,M,46.9,M,,"),
+		  &fix) == 0);
+	CHECK(fix.has_altitude && nearly_equal(fix.altitude_m, -12.5));
+}
+
+static void test_gga_without_hdop_and_altitude(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_gga(make_sentence("GPGGA,235947.00,,,,,0,00,,,,,,,"), &fix) == 0);
+	CHECK(!fix.has_hdop);
+	CHECK(!fix.has_altitude);
+}
+
+static void test_gga_bad_hdop_or_altitude_is_rejected(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_gga(
+		  make_sentence("GPGGA,123519,4807.038,N,01131.000,E,1,08,abc,545.4,M,46.9,M,,"),
+		  &fix) == -EINVAL);
+	CHECK(nmea_parse_gga(
+		  make_sentence("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,5.4.5,M,46.9,M,,"),
+		  &fix) == -EINVAL);
+	CHECK(nmea_parse_gga(
+		  make_sentence("GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,--5,M,46.9,M,,"),
+		  &fix) == -EINVAL);
+}
+
 int main(void)
 {
+	test_rmc_course_and_date_are_parsed();
+	test_rmc_without_course_and_date();
+	test_rmc_bad_course_or_date_is_rejected();
+	test_gga_hdop_and_altitude();
+	test_gga_without_hdop_and_altitude();
+	test_gga_bad_hdop_or_altitude_is_rejected();
 	test_rmc_example_is_parsed();
 	test_gga_example_is_parsed();
 	test_rmc_without_fix_has_empty_fields();

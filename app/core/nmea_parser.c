@@ -31,6 +31,12 @@
 #define MAX_LATITUDE_DEGREES 90.0
 #define MAX_LONGITUDE_DEGREES 180.0
 
+#define MAX_COURSE_DEGREES 360.0
+#define DATE_LENGTH 6 /* ddmmyy */
+#define MAX_DAY 31
+#define MONTHS_PER_YEAR 12
+#define YEAR_BASE 2000
+
 #define MAX_SATELLITE_DIGITS 2
 #define MAX_QUALITY_DIGITS 1
 
@@ -47,6 +53,8 @@ enum rmc_field {
 	RMC_LONGITUDE = 5,
 	RMC_LONGITUDE_HEMISPHERE = 6,
 	RMC_SPEED = 7,
+	RMC_COURSE = 8,
+	RMC_DATE = 9,
 };
 
 enum gga_field {
@@ -57,6 +65,8 @@ enum gga_field {
 	GGA_LONGITUDE_HEMISPHERE = 5,
 	GGA_QUALITY = 6,
 	GGA_SATELLITES = 7,
+	GGA_HDOP = 8,
+	GGA_ALTITUDE = 9,
 };
 
 /* Тіло рядка, розрізане по комах. items[i] вказують усередину payload. */
@@ -75,6 +85,8 @@ static int parse_position(const char *latitude, const char *latitude_hemisphere,
 static int parse_coordinate(const char *value, const char *hemisphere, char positive, char negative,
 			    double max_degrees, double *degrees);
 static int parse_decimal(const char *text, double *number);
+static int parse_signed_decimal(const char *text, double *number);
+static int parse_date(const char *field, struct nmea_fix *fix);
 static int parse_small_integer(const char *text, size_t max_digits, unsigned int *number);
 static bool is_digit(char c);
 static unsigned int two_digits(const char *text);
@@ -122,6 +134,21 @@ int nmea_parse_rmc(const char *sentence, struct nmea_fix *fix)
 			return error;
 		}
 		result.has_speed = true;
+	}
+
+	/* Курс і дата йдуть за швидкістю; у коротких рядках їх може не бути взагалі. */
+	if (fields.count > RMC_COURSE && fields.items[RMC_COURSE][0] != '\0') {
+		error = parse_decimal(fields.items[RMC_COURSE], &result.course_degrees);
+		if (error < 0 || result.course_degrees > MAX_COURSE_DEGREES) {
+			return -EINVAL;
+		}
+		result.has_course = true;
+	}
+	if (fields.count > RMC_DATE) {
+		error = parse_date(fields.items[RMC_DATE], &result);
+		if (error < 0) {
+			return error;
+		}
 	}
 
 	*fix = result;
@@ -175,6 +202,22 @@ int nmea_parse_gga(const char *sentence, struct nmea_fix *fix)
 		}
 		result.satellites = (uint8_t)number;
 		result.has_satellites = true;
+	}
+
+	/* HDOP і висота йдуть за кількістю супутників; висота може бути від'ємною. */
+	if (fields.count > GGA_HDOP && fields.items[GGA_HDOP][0] != '\0') {
+		error = parse_decimal(fields.items[GGA_HDOP], &result.hdop);
+		if (error < 0) {
+			return error;
+		}
+		result.has_hdop = true;
+	}
+	if (fields.count > GGA_ALTITUDE && fields.items[GGA_ALTITUDE][0] != '\0') {
+		error = parse_signed_decimal(fields.items[GGA_ALTITUDE], &result.altitude_m);
+		if (error < 0) {
+			return error;
+		}
+		result.has_altitude = true;
 	}
 
 	*fix = result;
@@ -367,6 +410,58 @@ static int parse_decimal(const char *text, double *number)
 	}
 
 	*number = strtod(text, NULL);
+	return 0;
+}
+
+/* Десяткове число з необов'язковим мінусом на початку (висота над рівнем моря). */
+static int parse_signed_decimal(const char *text, double *number)
+{
+	bool negative = text[0] == '-';
+	int error = parse_decimal(negative ? text + 1 : text, number);
+
+	if (error < 0) {
+		return error;
+	}
+	if (negative) {
+		*number = -*number;
+	}
+
+	return 0;
+}
+
+/*
+ * Дата "ddmmyy". Порожнє поле означає "дати ще нема". Двозначний рік це 2000 + yy: модуль NEO-6M
+ * віддає роки 2000..2099, раніше за 2000 його дати не бувають.
+ */
+static int parse_date(const char *field, struct nmea_fix *fix)
+{
+	unsigned int day;
+	unsigned int month;
+	size_t i;
+
+	if (field[0] == '\0') {
+		return 0;
+	}
+	for (i = 0; i < DATE_LENGTH; i++) {
+		if (!is_digit(field[i])) {
+			return -EINVAL;
+		}
+	}
+	if (field[DATE_LENGTH] != '\0') {
+		return -EINVAL;
+	}
+
+	day = two_digits(field);
+	month = two_digits(field + 2);
+	if (day < 1 || day > MAX_DAY || month < 1 || month > MONTHS_PER_YEAR) {
+		return -EINVAL;
+	}
+
+	fix->has_date = true;
+	fix->day = (uint8_t)day;
+	fix->month = (uint8_t)month;
+	fix->year = (uint16_t)(YEAR_BASE + two_digits(field + 4));
+
 	return 0;
 }
 

@@ -17,6 +17,7 @@
 #include "io_util.h"
 #include "motion_defaults.h"
 #include "sensor.h"
+#include "utc_time.h"
 
 /* Як довго потік спить, коли в буфері порожньо. 10 мс = не більше ~100 прокидань на секунду. */
 #define IDLE_SLEEP_MS 10
@@ -134,6 +135,7 @@ int log_writer_format_aux(char *out, size_t size, int64_t timestamp_ms, double x
 int log_writer_format_gps(char *out, size_t size, const struct sample *sample)
 {
 	char sats[16];
+	size_t used;
 	int length;
 
 	if (out == NULL || sample == NULL || sample->source != SAMPLE_SOURCE_GPS) {
@@ -149,22 +151,71 @@ int log_writer_format_gps(char *out, size_t size, const struct sample *sample)
 		length = snprintf(
 		    out, size, "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"fix\":false,\"sats\":%s}\n",
 		    sample->time_ms, GPS_SOURCE_NAME, sats);
-	} else if (!isfinite(sample->latitude_deg) || !isfinite(sample->longitude_deg) ||
-		   !isfinite(sample->speed_knots)) {
-		return -EINVAL;
-	} else {
-		length = snprintf(out, size,
-				  "{\"t_ms\":%" PRId64
-				  ",\"src\":\"%s\",\"fix\":true,\"lat\":%.6f,\"lon\":%.6f,"
-				  "\"speed_knots\":%.2f,\"sats\":%s}\n",
-				  sample->time_ms, GPS_SOURCE_NAME, sample->latitude_deg,
-				  sample->longitude_deg, sample->speed_knots, sats);
+		if (length < 0 || (size_t)length >= size) {
+			return -ENOSPC;
+		}
+		return length;
 	}
+	if (!isfinite(sample->latitude_deg) || !isfinite(sample->longitude_deg) ||
+	    !isfinite(sample->speed_knots) || !isfinite(sample->course_deg) ||
+	    !isfinite(sample->altitude_m) || !isfinite(sample->hdop)) {
+		return -EINVAL;
+	}
+
+	length =
+	    snprintf(out, size,
+		     "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"fix\":true,\"lat\":%.6f,\"lon\":%.6f,"
+		     "\"speed_knots\":%.2f,\"sats\":%s",
+		     sample->time_ms, GPS_SOURCE_NAME, sample->latitude_deg, sample->longitude_deg,
+		     sample->speed_knots, sats);
 	if (length < 0 || (size_t)length >= size) {
 		return -ENOSPC;
 	}
+	used = (size_t)length;
 
-	return length;
+	/* Необов'язкові поля йдуть ПІСЛЯ основних і лише коли відомі: старі розбирачі лога їх не
+	 * бачать. */
+	if (sample->has_utc) {
+		char text[UTC_TIME_TEXT_SIZE];
+
+		if (utc_time_format(text, sizeof(text), sample->utc_epoch_s) < 0) {
+			return -EINVAL;
+		}
+		length = snprintf(out + used, size - used, ",\"utc\":\"%s\"", text);
+		if (length < 0 || (size_t)length >= size - used) {
+			return -ENOSPC;
+		}
+		used += (size_t)length;
+	}
+	if (sample->has_altitude) {
+		length = snprintf(out + used, size - used, ",\"alt_m\":%.1f", sample->altitude_m);
+		if (length < 0 || (size_t)length >= size - used) {
+			return -ENOSPC;
+		}
+		used += (size_t)length;
+	}
+	if (sample->has_course) {
+		length =
+		    snprintf(out + used, size - used, ",\"course_deg\":%.1f", sample->course_deg);
+		if (length < 0 || (size_t)length >= size - used) {
+			return -ENOSPC;
+		}
+		used += (size_t)length;
+	}
+	if (sample->has_hdop) {
+		length = snprintf(out + used, size - used, ",\"hdop\":%.2f", sample->hdop);
+		if (length < 0 || (size_t)length >= size - used) {
+			return -ENOSPC;
+		}
+		used += (size_t)length;
+	}
+
+	length = snprintf(out + used, size - used, "}\n");
+	if (length < 0 || (size_t)length >= size - used) {
+		return -ENOSPC;
+	}
+
+	return (int)(used + (size_t)length);
 }
 
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path)

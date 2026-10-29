@@ -88,6 +88,14 @@ GPS_NO_FIX_LINES=$(count_lines '"src":"gps","fix":false')
 grep -q '"src":"accel2","x_g":0.0000,"y_g":0.0000,"z_g":1.0000' "$LOG" ||
 	fail "accel2 line has unexpected values"
 
+# Додаткові поля GPS (час UTC з супутників, висота, курс, HDOP) беруться з рядків RMC і GGA файла NMEA.
+grep -q '"fix":true,.*"utc":"2026-10-28T12:00:[0-9][0-9]Z","alt_m":180.0,"course_deg":90.0,"hdop":1.20}' "$LOG" ||
+	fail "gps line with utc, altitude, course and hdop not found"
+# Без фіксації часу UTC немає: модуль міг узяти його зі своєї пам'яті.
+if grep '"fix":false' "$LOG" | grep -q '"utc"'; then
+	fail "gps line without a fix has a utc time"
+fi
+
 case "$(cat "$SUMMARY")" in
 *"dropped 0,"*"log errors 0,"*) ;;
 *) fail "unexpected summary: $(cat "$SUMMARY")" ;;
