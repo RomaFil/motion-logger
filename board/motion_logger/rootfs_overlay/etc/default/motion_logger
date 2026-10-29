@@ -5,7 +5,7 @@
 #   MOTION_LOGGER_OPTS="--replay /root/accel_sample.csv --speed 1 --log /var/log/motion.jsonl"
 #
 # Справжні датчики (номери iio:deviceN звірте з /sys/bus/iio/devices/iio:device*/name):
-#   MOTION_LOGGER_OPTS="--iio /sys/bus/iio/devices/iio:device0 --iio-aux /sys/bus/iio/devices/iio:device1 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl"
+#   MOTION_LOGGER_OPTS="--iio /sys/bus/iio/devices/iio:device0 --iio-aux /sys/bus/iio/devices/iio:device1 --iio-gyro /sys/bus/iio/devices/iio:device0 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl"
 #
 # Лог на кореневій файловій системі зношує SD-картку; для довгої роботи виносьте його на
 # окремий розділ або tmpfs.
