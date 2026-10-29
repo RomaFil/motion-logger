@@ -28,11 +28,14 @@
 #define SIM_SOURCE_NAME "sim"
 #define ACCEL_SOURCE_NAME "accel"
 #define ACCEL2_SOURCE_NAME "accel2"
+#define GYRO_SOURCE_NAME "gyro"
 #define GPS_SOURCE_NAME "gps"
 
 /* Додатковий акселерометр пишемо не частіше за цей інтервал: 100 відліків на секунду в лог не
  * потрібні. */
 #define AUX_PERIOD_MS 1000
+/* Гіроскоп теж не частіше за цей інтервал. */
+#define GYRO_PERIOD_MS 1000
 
 #define LOG_FILE_MODE 0644
 
@@ -45,6 +48,7 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 static void write_aux_sample(struct log_writer *lw, const struct sample *item);
 static void write_impact_events(struct log_writer *lw, const struct sample *item);
 static void write_gps_sample(struct log_writer *lw, const struct sample *item);
+static void write_gyro_sample(struct log_writer *lw, const struct sample *item);
 static void write_line(struct log_writer *lw, const char *line, int length);
 static void sleep_idle(void);
 
@@ -154,6 +158,39 @@ int log_writer_format_aux(char *out, size_t size, int64_t timestamp_ms, double x
 			  "{\"t_ms\":%" PRId64
 			  ",\"src\":\"%s\",\"x_g\":%.4f,\"y_g\":%.4f,\"z_g\":%.4f}\n",
 			  timestamp_ms, ACCEL2_SOURCE_NAME, x_g, y_g, z_g);
+	if (length < 0 || (size_t)length >= size) {
+		return -ENOSPC;
+	}
+
+	return length;
+}
+
+int log_writer_format_gyro(char *out, size_t size, const struct sample *sample)
+{
+	int length;
+
+	if (out == NULL || sample == NULL || sample->source != SAMPLE_SOURCE_GYRO ||
+	    !isfinite(sample->x_g) || !isfinite(sample->y_g) || !isfinite(sample->z_g)) {
+		return -EINVAL;
+	}
+
+	if (sample->has_temperature) {
+		if (!isfinite(sample->temperature_c)) {
+			return -EINVAL;
+		}
+		length =
+		    snprintf(out, size,
+			     "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"x_dps\":%.2f,\"y_dps\":%.2f,"
+			     "\"z_dps\":%.2f,\"temp_c\":%.1f}\n",
+			     sample->time_ms, GYRO_SOURCE_NAME, sample->x_g, sample->y_g,
+			     sample->z_g, sample->temperature_c);
+	} else {
+		length = snprintf(
+		    out, size,
+		    "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"x_dps\":%.2f,\"y_dps\":%.2f,"
+		    "\"z_dps\":%.2f}\n",
+		    sample->time_ms, GYRO_SOURCE_NAME, sample->x_g, sample->y_g, sample->z_g);
+	}
 	if (length < 0 || (size_t)length >= size) {
 		return -ENOSPC;
 	}
@@ -271,6 +308,8 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 	impact_detector_init(&lw->impact_detector);
 	lw->source_buffer = rb;
 	lw->aux_seen = false;
+	lw->gyro_seen = false;
+	lw->last_gyro_ms = 0;
 	lw->last_aux_ms = 0;
 	memset(&lw->stats, 0, sizeof(lw->stats));
 	atomic_init(&lw->stop_requested, false);
@@ -373,6 +412,9 @@ static void handle_sample(struct log_writer *lw, const struct sample *item)
 	case SAMPLE_SOURCE_ACCEL2:
 		write_aux_sample(lw, item);
 		break;
+	case SAMPLE_SOURCE_GYRO:
+		write_gyro_sample(lw, item);
+		break;
 	case SAMPLE_SOURCE_GPS:
 		write_gps_sample(lw, item);
 		break;
@@ -466,6 +508,25 @@ static void write_aux_sample(struct log_writer *lw, const struct sample *item)
 		lw->stats.aux++;
 		lw->aux_seen = true;
 		lw->last_aux_ms = item->time_ms;
+	}
+}
+
+/* Гіроскоп: не частіше одного рядка на GYRO_PERIOD_MS за мітками часу відліків. */
+static void write_gyro_sample(struct log_writer *lw, const struct sample *item)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	int length;
+
+	if (lw->gyro_seen && item->time_ms - lw->last_gyro_ms < GYRO_PERIOD_MS) {
+		return;
+	}
+
+	length = log_writer_format_gyro(line, sizeof(line), item);
+	write_line(lw, line, length);
+	if (length >= 0) {
+		lw->stats.gyro++;
+		lw->gyro_seen = true;
+		lw->last_gyro_ms = item->time_ms;
 	}
 }
 

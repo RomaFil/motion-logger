@@ -19,11 +19,13 @@
 
 /** @brief Один відлік акселерометра. */
 struct accel_sample {
-	int64_t time_ms; /**< мілісекунди за годинником датчика (для запису з файлу: від його
-			    початку) */
-	double x_g;	 /**< прискорення по X, g */
-	double y_g;	 /**< прискорення по Y, g */
-	double z_g;	 /**< прискорення по Z, g */
+	int64_t time_ms;      /**< мілісекунди за годинником датчика (для запису з файлу: від його
+				 початку) */
+	double x_g;	      /**< прискорення по X, g */
+	double y_g;	      /**< прискорення по Y, g */
+	double z_g;	      /**< прискорення по Z, g */
+	bool has_temperature; /**< чи драйвер віддав температуру датчика */
+	double temperature_c; /**< температура датчика, °C (лише коли has_temperature) */
 };
 
 /** @brief Звідки взято запис у буфері. */
@@ -32,6 +34,8 @@ enum sample_source {
 	SAMPLE_SOURCE_ACCEL,  /**< основний акселерометр: три осі в g, з нього рахується рух */
 	SAMPLE_SOURCE_ACCEL2, /**< додатковий акселерометр: три осі в g, лише для журналу */
 	SAMPLE_SOURCE_GPS,    /**< GPS: позиція й швидкість (розібраний рядок RMC) */
+	SAMPLE_SOURCE_GYRO, /**< гіроскоп: x_g, y_g, z_g тут у градусах за секунду, плюс температура
+			     */
 };
 
 /**
@@ -56,13 +60,15 @@ struct sample {
 	int satellites; /**< (лише GPS) скільки супутників у останньому GGA, або -1, якщо ще не було
 			 */
 	bool has_utc;	/**< (лише GPS, коли gps_fix) чи є дата й час UTC з рядка RMC */
-	int64_t utc_epoch_s; /**< секунди з 1970-01-01T00:00:00Z, коли has_utc */
-	bool has_course;     /**< (лише GPS, коли gps_fix) чи є курс */
-	double course_deg;   /**< курс відносно півночі, градуси */
-	bool has_altitude;   /**< (лише GPS, коли gps_fix) чи є висота з останнього GGA */
-	double altitude_m;   /**< висота над рівнем моря, метри */
-	bool has_hdop;	     /**< (лише GPS, коли gps_fix) чи є HDOP з останнього GGA */
-	double hdop;	     /**< горизонтальний розкид: чим менше, тим точніше (до 2 добре) */
+	int64_t utc_epoch_s;  /**< секунди з 1970-01-01T00:00:00Z, коли has_utc */
+	bool has_course;      /**< (лише GPS, коли gps_fix) чи є курс */
+	double course_deg;    /**< курс відносно півночі, градуси */
+	bool has_altitude;    /**< (лише GPS, коли gps_fix) чи є висота з останнього GGA */
+	double altitude_m;    /**< висота над рівнем моря, метри */
+	bool has_hdop;	      /**< (лише GPS, коли gps_fix) чи є HDOP з останнього GGA */
+	double hdop;	      /**< горизонтальний розкид: чим менше, тим точніше (до 2 добре) */
+	bool has_temperature; /**< (лише GYRO) чи є температура датчика */
+	double temperature_c; /**< (лише GYRO) температура датчика, °C */
 };
 
 /**

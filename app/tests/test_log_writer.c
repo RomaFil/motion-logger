@@ -835,8 +835,88 @@ static void test_fall_and_impact_reach_the_log(void)
 	unlink(path);
 }
 
+static struct sample make_gyro_item(int64_t time_ms, double x_dps, bool has_temperature,
+				    double temperature_c)
+{
+	struct sample item = {.source = SAMPLE_SOURCE_GYRO,
+			      .time_ms = time_ms,
+			      .x_g = x_dps,
+			      .y_g = -0.3,
+			      .z_g = 0.05,
+			      .has_temperature = has_temperature,
+			      .temperature_c = temperature_c};
+
+	return item;
+}
+
+static void test_format_gyro_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gyro_item(21000, 0.124, true, 31.44);
+
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gyro\",\"x_dps\":0.12,\"y_dps\":-0.30,"
+			   "\"z_dps\":0.05,\"temp_c\":31.4}\n") == 0);
+
+	/* Без температури поля temp_c у рядку нема. */
+	item.has_temperature = false;
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gyro\",\"x_dps\":0.12,\"y_dps\":-0.30,"
+			   "\"z_dps\":0.05}\n") == 0);
+}
+
+static void test_format_gyro_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+	struct sample item = make_gyro_item(0, 1.0, true, 25.0);
+	struct sample not_gyro = make_sim_sample(1);
+
+	CHECK(log_writer_format_gyro(NULL, sizeof(line), &item) == -EINVAL);
+	CHECK(log_writer_format_gyro(line, sizeof(line), NULL) == -EINVAL);
+	CHECK(log_writer_format_gyro(line, sizeof(line), &not_gyro) == -EINVAL);
+	CHECK(log_writer_format_gyro(tiny, sizeof(tiny), &item) == -ENOSPC);
+	item.x_g = NAN;
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) == -EINVAL);
+	item.x_g = 1.0;
+	item.temperature_c = INFINITY;
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) == -EINVAL);
+}
+
+/* Гіроскоп на 100 Гц дає в лог не більше рядка на секунду, перший відлік одразу. */
+static void test_gyro_samples_are_written_once_per_second(void)
+{
+	struct sample storage[ACCEL_RATE_HZ * 3];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	char path[TEMP_PATH_SIZE];
+	int64_t time_ms;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	for (time_ms = 0; time_ms < 2500; time_ms += MS_PER_SAMPLE) {
+		struct sample item = make_gyro_item(time_ms, 1.0, true, 30.0);
+
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.gyro == 3); /* t = 0, 1000, 2000 */
+	CHECK(stats.written == 3);
+	CHECK(stats.failed == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 int main(void)
 {
+	test_format_gyro_produces_exact_json();
+	test_format_gyro_rejects_bad_input();
+	test_gyro_samples_are_written_once_per_second();
 	test_format_line_produces_exact_json();
 	test_format_line_rejects_bad_input();
 	test_format_event_produces_exact_json();
