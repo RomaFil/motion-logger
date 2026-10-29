@@ -1,5 +1,7 @@
 # Налаштування прошивки Pi 5 для Motion Logger (власний образ Buildroot)
-kernel=Image
+# Крок 4.7: прошивка запускає U-Boot, а він з boot.scr вантажить Image. Без U-Boot: kernel=Image.
+arm_64bit=1
+kernel=u-boot.bin
 disable_overscan=1
 
 # UART на GPIO14/15 (DBG1 на платі): ttyAMA0 для getty і лог самої прошивки на тих самих пінах.
