@@ -8,6 +8,12 @@ BOARD_DIR="$(dirname "$0")"
 GENIMAGE_CFG="${BINARIES_DIR}/genimage.cfg"
 GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
 
+# config.txt і cmdline.txt беремо з репозиторію щоразу: пакет rpi-firmware копіює їх у images/ лише коли
+# сам перебудовується, а Buildroot не помічає змін у файлах, шлях до яких заданий у defconfig. Через це
+# перша збірка з датчиками (29.10.2026) отримала старий config.txt без dtparam і dtoverlay.
+mkdir -p "${BINARIES_DIR}/rpi-firmware"
+cp "${BOARD_DIR}/config.txt" "${BOARD_DIR}/cmdline.txt" "${BINARIES_DIR}/rpi-firmware/"
+
 # Pi 5 із чипом BCM2712 D0 (зокрема модель 16 ГБ): прошивка шукає /overlays/bcm2712d0.dtbo.
 # Оверлей збирається разом із ядром, але Buildroot його в образ не кладе, тому беремо з каталогу ядра.
 OVL_SRC=$(ls "${BUILD_DIR}"/linux-*/arch/arm/boot/dts/overlays/bcm2712d0.dtbo 2>/dev/null | head -n 1)
