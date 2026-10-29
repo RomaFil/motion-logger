@@ -193,6 +193,9 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 	lw->last_aux_ms = 0;
 	memset(&lw->stats, 0, sizeof(lw->stats));
 	atomic_init(&lw->stop_requested, false);
+	atomic_init(&lw->paused, false);
+	atomic_init(&lw->needs_reset, false);
+	atomic_init(&lw->moving, false);
 
 	error = pthread_create(&lw->thread, NULL, run_writer_thread, lw);
 	if (error != 0) {
@@ -201,6 +204,22 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 	}
 
 	return 0;
+}
+
+void log_writer_set_paused(struct log_writer *lw, bool paused)
+{
+	if (lw == NULL) {
+		return;
+	}
+	if (!paused) {
+		atomic_store(&lw->needs_reset, true); /* спершу скидання, потім зняття паузи */
+	}
+	atomic_store(&lw->paused, paused);
+}
+
+bool log_writer_is_moving(const struct log_writer *lw)
+{
+	return lw != NULL && atomic_load(&lw->moving);
 }
 
 int log_writer_stop(struct log_writer *lw, struct log_writer_stats *stats)
@@ -282,6 +301,17 @@ static void *run_writer_thread(void *argument)
  */
 static void handle_sample(struct log_writer *lw, const struct sample *item)
 {
+	if (atomic_load(&lw->paused)) {
+		lw->stats.paused++;
+		return;
+	}
+	if (atomic_exchange(&lw->needs_reset, false)) {
+		/* Параметри допустимі за побудовою, як і в log_writer_start. */
+		(void)motion_report_init(&lw->detector, MOTION_DEFAULT_WINDOW,
+					 MOTION_DEFAULT_THRESHOLD_G, MOTION_DEFAULT_CONFIRM);
+		atomic_store(&lw->moving, false);
+	}
+
 	switch (item->source) {
 	case SAMPLE_SOURCE_SIM:
 		write_sim_sample(lw, item);
@@ -335,6 +365,8 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 	if (update.event == MOTION_EVENT_NONE) {
 		return;
 	}
+
+	atomic_store(&lw->moving, update.event == MOTION_EVENT_START);
 
 	length = log_writer_format_event(line, sizeof(line), item->time_ms, update.event);
 	write_line(lw, line, length);

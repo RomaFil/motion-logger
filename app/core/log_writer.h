@@ -64,6 +64,7 @@ struct log_writer_stats {
 	size_t aux;	/**< з них скільки рядків додаткового акселерометра */
 	size_t gps;	/**< з них скільки рядків GPS */
 	size_t failed;	/**< скільки записів не вдалося обробити чи записати */
+	size_t paused;	/**< скільки записів відкинуто, поки запис був на паузі (не помилка) */
 };
 
 /** @brief Стан записувача. Поля змінюй лише через функції log_writer_*. */
@@ -75,6 +76,9 @@ struct log_writer {
 	int fd;
 	pthread_t thread;
 	atomic_bool stop_requested;
+	atomic_bool paused;	 /**< true: записи з буфера забираються й відкидаються */
+	atomic_bool needs_reset; /**< після паузи фільтр руху починає з чистого аркуша */
+	atomic_bool moving;	 /**< останній стан руху: true між MOVE_START і MOVE_STOP */
 	struct log_writer_stats stats;
 };
 
@@ -150,6 +154,19 @@ int log_writer_format_gps(char *out, size_t size, const struct sample *sample);
  *         або створення потоку
  */
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path);
+
+/**
+ * @brief Ставить запис на паузу чи знімає з неї (можна викликати з будь-якого потоку).
+ *
+ * Поки пауза, записувач забирає записи з буфера, але в лог не пише й у фільтр руху не подає
+ * (рахує в stats.paused), тож буфер не переповнюється. Після зняття паузи фільтр руху
+ * починає заново: розрив у часі не повинен плутати вікно усереднення.
+ */
+void log_writer_set_paused(struct log_writer *lw, bool paused);
+
+/** @brief Чи рух зараз зафіксовано: true від MOVE_START до MOVE_STOP (можна з будь-якого потоку).
+ */
+bool log_writer_is_moving(const struct log_writer *lw);
 
 /**
  * @brief Зупиняє записувач: дописує все, що ще лежить у буфері, закриває файл.
