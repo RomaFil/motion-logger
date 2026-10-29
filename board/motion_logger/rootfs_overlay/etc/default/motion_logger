@@ -7,6 +7,10 @@
 # Справжні датчики (номери iio:deviceN звірте з /sys/bus/iio/devices/iio:device*/name):
 #   MOTION_LOGGER_OPTS="--iio /sys/bus/iio/devices/iio:device0 --iio-aux /sys/bus/iio/devices/iio:device1 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl"
 #
+# Кнопка й RGB-світлодіод (GPIO17 і GPIO27/22/6): додай "--ui-gpio gpiochip4" (номер чіпа дивись gpiodetect;
+# якщо кнопка дає 0 при натисканні, ще "--ui-button-active-low"). Кнопка ставить запис на паузу:
+# синій пауза, зелений запис, червоний запис із рухом. Вимагає --log.
+#
 # Лог на кореневій файловій системі зношує SD-картку; для довгої роботи виносьте його на
 # окремий розділ або tmpfs.
 MOTION_LOGGER_OPTS=""
