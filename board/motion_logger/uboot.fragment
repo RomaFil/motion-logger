@@ -1,0 +1,4 @@
+# Зміни до rpi_arm64_defconfig U-Boot (крок 4.7).
+# mkeficapsule (інструмент підпису EFI-капсул для оновлення прошивки) на хості потребує gnutls, тобто
+# ще кількох десятків хостових пакетів Buildroot; нашому образу він не потрібен.
+# CONFIG_TOOLS_MKEFICAPSULE is not set
