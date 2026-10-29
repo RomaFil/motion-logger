@@ -6,3 +6,5 @@ build/
 *.log
 # особисті налаштування
 local.mk
+__pycache__/
+*.pyc
