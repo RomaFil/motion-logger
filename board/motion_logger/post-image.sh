@@ -64,6 +64,16 @@ done
 KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
 FILES+=( "${KERNEL}" )
 
+# З U-Boot (kernel=u-boot.bin) ядро вантажить уже він: Image мусить лежати на розділі boot поруч із
+# boot.scr, який збираємо з board/motion_logger/boot.cmd хостовим mkimage (пакет host-uboot-tools).
+# Шлях до скрипта не передаємо через defconfig: Kconfig там стирає $(BR2_EXTERNAL_..._PATH).
+if [ "${KERNEL}" != "Image" ]; then
+	FILES+=( "Image" )
+	"${HOST_DIR}/bin/mkimage" -A arm64 -O linux -T script -C none -n "Motion Logger" \
+		-d "${BOARD_DIR}/boot.cmd" "${BINARIES_DIR}/boot.scr"
+	FILES+=( "boot.scr" )
+fi
+
 BOOT_FILES=$(printf '\\t\\t\\t"%s",\\n' "${FILES[@]}")
 sed "s|#BOOT_FILES#|${BOOT_FILES}|" "${BOARD_DIR}/genimage.cfg.in" \
 	> "${GENIMAGE_CFG}"
