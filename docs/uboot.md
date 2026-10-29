@@ -13,10 +13,10 @@
 
 | Файл | Що робить |
 |---|---|
-| `configs/motion_logger_defconfig` | `BR2_TARGET_UBOOT=y`, плата `rpi_arm64`, `BR2_PACKAGE_HOST_UBOOT_TOOLS=y` (потрібен `mkimage`) |
+| `configs/motion_logger_defconfig` | `BR2_TARGET_UBOOT=y`, плата `rpi_arm64`, `uboot.fragment` вимикає `CONFIG_TOOLS_MKEFICAPSULE` (інакше потрібен gnutls) |
 | `board/motion_logger/config.txt` | `arm_64bit=1`, `kernel=u-boot.bin` замість `kernel=Image` |
 | `board/motion_logger/boot.cmd` | скрипт U-Boot: задає `bootargs`, вантажить `Image` з розділу boot, `booti` |
-| `board/motion_logger/post-image.sh` | коли `kernel=u-boot.bin`: додає `Image` на розділ boot і збирає `boot.scr` з `boot.cmd` хостовим `mkimage` |
+| `board/motion_logger/post-image.sh` | коли `kernel=u-boot.bin`: додає `Image` на розділ boot і збирає `boot.scr` з `boot.cmd` програмою `mkimage` з дерева збірки U-Boot |
 
 Рядок ядра в `boot.cmd` (`root=/dev/mmcblk0p2 rootwait console=tty1 console=ttyAMA10,115200`) дублює `cmdline.txt`, бо U-Boot бере `bootargs` зі свого середовища. Змінюєш один файл, змінюй і другий.
 
@@ -39,4 +39,4 @@
 
 - Номер пристрою `mmc 0` для SD на Pi 5 в U-Boot; у `boot.cmd` ми користуємось змінними `devtype`, `devnum`, `distro_bootpart`, які виставляє distro boot, щоб не зашивати номер.
 - Чи залишається в device tree від прошивки застосований `dtoverlay=motion-logger-sensors` (за описом прошивки так, перевіряється командою `fdt print /soc/...` або просто появою датчиків в IIO).
-- Чи достатньо `rpi_arm64_defconfig` для SD на Pi 5 у збірці U-Boot 2026.07 з Buildroot: зібрано, на платі не запускалось. Мережа, USB і NVMe в U-Boot для Pi 5 неповні, для завантаження з SD це не заважає.
+- Чи достатньо `rpi_arm64_defconfig` для SD на Pi 5: U-Boot 2026.07 з Buildroot 2026.08 **зібрано на VPS** (`u-boot.bin` ≈ 0,9 МБ), `mkimage` зібрав `boot.scr` з `boot.cmd` без помилок; повний образ із U-Boot не збирався, на платі не запускалось. Мережа, USB і NVMe в U-Boot для Pi 5 неповні, для завантаження з SD це не заважає.

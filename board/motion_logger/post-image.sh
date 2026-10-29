@@ -65,12 +65,18 @@ KERNEL=$(sed -n 's/^kernel=//p' "${BINARIES_DIR}/rpi-firmware/config.txt")
 FILES+=( "${KERNEL}" )
 
 # З U-Boot (kernel=u-boot.bin) ядро вантажить уже він: Image мусить лежати на розділі boot поруч із
-# boot.scr, який збираємо з board/motion_logger/boot.cmd хостовим mkimage (пакет host-uboot-tools).
-# Шлях до скрипта не передаємо через defconfig: Kconfig там стирає $(BR2_EXTERNAL_..._PATH).
+# boot.scr, який збираємо з board/motion_logger/boot.cmd. mkimage беремо з дерева збірки самого
+# U-Boot (як dtc з ядра вище): пакет host-uboot-tools тягне за собою gnutls і ще десятки хостових
+# пакетів. Шлях до скрипта не передаємо через defconfig: Kconfig там стирає $(BR2_EXTERNAL_..._PATH).
 if [ "${KERNEL}" != "Image" ]; then
+	MKIMAGE=$(ls "${BUILD_DIR}"/uboot-*/tools/mkimage 2>/dev/null | head -n 1)
+	if [ -z "${MKIMAGE}" ]; then
+		echo "post-image: не знайдено tools/mkimage у каталозі збірки U-Boot" >&2
+		exit 1
+	fi
 	FILES+=( "Image" )
-	"${HOST_DIR}/bin/mkimage" -A arm64 -O linux -T script -C none -n "Motion Logger" \
-		-d "${BOARD_DIR}/boot.cmd" "${BINARIES_DIR}/boot.scr"
+	"${MKIMAGE}" -A arm64 -O linux -T script -C none -n "Motion Logger" \
+		-d "${BOARD_DIR}/boot.cmd" "${BINARIES_DIR}/boot.scr" > /dev/null
 	FILES+=( "boot.scr" )
 fi
 
