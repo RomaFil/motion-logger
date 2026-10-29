@@ -43,6 +43,7 @@ static void handle_sample(struct log_writer *lw, const struct sample *item);
 static void write_sim_sample(struct log_writer *lw, const struct sample *item);
 static void write_accel_sample(struct log_writer *lw, const struct sample *item);
 static void write_aux_sample(struct log_writer *lw, const struct sample *item);
+static void write_impact_events(struct log_writer *lw, const struct sample *item);
 static void write_gps_sample(struct log_writer *lw, const struct sample *item);
 static void write_line(struct log_writer *lw, const char *line, int length);
 static void sleep_idle(void);
@@ -84,6 +85,34 @@ int log_writer_format_event(char *out, size_t size, int64_t timestamp_ms, enum m
 
 	length = snprintf(out, size, "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"event\":\"%s\"}\n",
 			  timestamp_ms, ACCEL_SOURCE_NAME, name);
+	if (length < 0 || (size_t)length >= size) {
+		return -ENOSPC;
+	}
+
+	return length;
+}
+
+int log_writer_format_impact(char *out, size_t size, int64_t timestamp_ms,
+			     const struct impact_event *event)
+{
+	int length;
+
+	if (out == NULL || event == NULL) {
+		return -EINVAL;
+	}
+	if (event->kind == IMPACT_EVENT_FREE_FALL) {
+		length = snprintf(out, size,
+				  "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"event\":\"FREE_FALL\","
+				  "\"duration_ms\":%" PRId64 "}\n",
+				  timestamp_ms, ACCEL_SOURCE_NAME, event->duration_ms);
+	} else if (event->kind == IMPACT_EVENT_IMPACT && isfinite(event->magnitude_g)) {
+		length = snprintf(out, size,
+				  "{\"t_ms\":%" PRId64 ",\"src\":\"%s\",\"event\":\"IMPACT\","
+				  "\"magnitude_g\":%.4f}\n",
+				  timestamp_ms, ACCEL_SOURCE_NAME, event->magnitude_g);
+	} else {
+		return -EINVAL;
+	}
 	if (length < 0 || (size_t)length >= size) {
 		return -ENOSPC;
 	}
@@ -239,6 +268,7 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 		return -errno;
 	}
 
+	impact_detector_init(&lw->impact_detector);
 	lw->source_buffer = rb;
 	lw->aux_seen = false;
 	lw->last_aux_ms = 0;
@@ -383,6 +413,7 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 			lw->stats.rows++;
 		}
 	}
+	write_impact_events(lw, item);
 	if (update.event == MOTION_EVENT_NONE) {
 		return;
 	}
@@ -391,6 +422,30 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 	write_line(lw, line, length);
 	if (length >= 0) {
 		lw->stats.events++;
+	}
+}
+
+/* Програмні події вільного падіння й удару з потоку відліків основного акселерометра. */
+static void write_impact_events(struct log_writer *lw, const struct sample *item)
+{
+	struct impact_event event;
+	char line[LOG_WRITER_LINE_SIZE];
+	int length;
+
+	if (impact_detector_add_sample(&lw->impact_detector, item->time_ms, item->x_g, item->y_g,
+				       item->z_g, &event) < 0) {
+		return; /* час спадає чи число не скінченне: відлік уже порахований як помилка вище
+			 */
+	}
+	if (event.kind == IMPACT_EVENT_NONE) {
+		return;
+	}
+
+	length = log_writer_format_impact(line, sizeof(line), item->time_ms, &event);
+	write_line(lw, line, length);
+	if (length >= 0) {
+		lw->stats.events++;
+		lw->stats.impacts++;
 	}
 }
 

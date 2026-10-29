@@ -50,7 +50,7 @@ TARGET := $(BUILD)/motion_logger
 SRCS := main.c core/ring_buffer.c core/sample_reader.c core/sensor_reader.c core/log_writer.c \
 	core/io_util.c core/motion_report.c core/motion_events.c core/motion_filter.c core/accel_csv.c \
 	drivers/csv_player.c drivers/iio_accel.c drivers/uart_port.c core/gps_reader.c core/nmea.c \
-	core/nmea_parser.c core/utc_time.c
+	core/nmea_parser.c core/utc_time.c core/impact_detector.c
 OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
 # Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
@@ -68,7 +68,7 @@ TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/t
 	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser $(BUILD)/test_motion_filter \
 	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report \
 	$(BUILD)/test_sensor_reader $(BUILD)/test_csv_player $(BUILD)/test_iio_accel \
-	$(BUILD)/test_gps_reader $(BUILD)/test_utc_time
+	$(BUILD)/test_gps_reader $(BUILD)/test_utc_time $(BUILD)/test_impact_detector
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
 	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
@@ -82,6 +82,7 @@ TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader
 	$(BUILD)/tests/test_iio_accel.o $(BUILD)/drivers/iio_accel.o \
 	$(BUILD)/tests/test_gps_reader.o $(BUILD)/core/gps_reader.o $(BUILD)/drivers/uart_port.o \
 	$(BUILD)/tests/test_utc_time.o $(BUILD)/core/utc_time.o \
+	$(BUILD)/tests/test_impact_detector.o $(BUILD)/core/impact_detector.o \
 	$(ANALYZE_OBJS)
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
@@ -115,7 +116,8 @@ $(BUILD)/test_sample_reader: $(BUILD)/tests/test_sample_reader.o $(BUILD)/core/s
 
 $(BUILD)/test_log_writer: $(BUILD)/tests/test_log_writer.o $(BUILD)/core/log_writer.o \
 		$(BUILD)/core/io_util.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/motion_report.o \
-		$(BUILD)/core/motion_events.o $(BUILD)/core/motion_filter.o $(BUILD)/core/utc_time.o
+		$(BUILD)/core/motion_events.o $(BUILD)/core/motion_filter.o $(BUILD)/core/utc_time.o \
+		$(BUILD)/core/impact_detector.o
 	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
 $(BUILD)/test_sensor_reader: $(BUILD)/tests/test_sensor_reader.o $(BUILD)/core/sensor_reader.o \
@@ -137,6 +139,9 @@ $(BUILD)/test_gps_reader: $(BUILD)/tests/test_gps_reader.o $(BUILD)/core/gps_rea
 
 $(BUILD)/test_utc_time: $(BUILD)/tests/test_utc_time.o $(BUILD)/core/utc_time.o
 	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_impact_detector: $(BUILD)/tests/test_impact_detector.o $(BUILD)/core/impact_detector.o
+	$(CC) $(LDFLAGS) -o $@ $^ -lm
 
 $(BUILD)/test_nmea: $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -222,14 +227,20 @@ $(BUILD)/test_gps_reader_tsan: tests/test_gps_reader.c tests/check.h core/gps_re
 $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_writer.c \
 		core/log_writer.h core/io_util.c core/io_util.h core/ring_buffer.c core/ring_buffer.h \
 		core/motion_report.c core/motion_report.h core/motion_events.c core/motion_events.h \
-		core/motion_filter.c core/motion_filter.h core/motion_defaults.h core/utc_time.c
+		core/motion_filter.c core/motion_filter.h core/motion_defaults.h core/utc_time.c \
+		core/impact_detector.c core/impact_detector.h
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_log_writer.c core/log_writer.c core/io_util.c \
-		core/ring_buffer.c core/motion_report.c core/motion_events.c core/motion_filter.c core/utc_time.c -lm
+		core/ring_buffer.c core/motion_report.c core/motion_events.c core/motion_filter.c core/utc_time.c \
+		core/impact_detector.c -lm
 
 $(BUILD)/test_utc_time_tsan: tests/test_utc_time.c tests/check.h core/utc_time.c core/utc_time.h
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_utc_time.c core/utc_time.c
+
+$(BUILD)/test_impact_detector_tsan: tests/test_impact_detector.c tests/check.h core/impact_detector.c core/impact_detector.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_impact_detector.c core/impact_detector.c -lm
 
 $(BUILD)/test_nmea_tsan: tests/test_nmea.c tests/check.h core/nmea.c core/nmea.h
 	@mkdir -p $(@D)

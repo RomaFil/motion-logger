@@ -14,6 +14,12 @@
  *     {"t_ms":40550,"src":"accel","event":"MOVE_STOP"}
  *     {"t_ms":21000,"src":"accel","second":20,"moving":true,"avg_dev_g":0.2105}
  *
+ *   програмні події за модулем прискорення (|a| = sqrt(x² + y² + z²), у спокої близько 1 g):
+ *     {"t_ms":5100,"src":"accel","event":"FREE_FALL","duration_ms":100}  невагомість від 100 мс
+ *     {"t_ms":5400,"src":"accel","event":"IMPACT","magnitude_g":4.5000}   удар від 2,5 g
+ *   Апаратні переривання датчиків на платі не підключені, тому рахуємо в програмі
+ * (impact_detector.h).
+ *
  *   додатковий акселерометр (SAMPLE_SOURCE_ACCEL2), не частіше одного рядка на секунду:
  *     {"t_ms":21000,"src":"accel2","x_g":0.0123,"y_g":-0.0042,"z_g":0.9987}
  *
@@ -49,6 +55,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "impact_detector.h"
 #include "motion_events.h"
 #include "motion_report.h"
 #include "ring_buffer.h"
@@ -66,6 +73,7 @@ struct log_writer_stats {
 	size_t rows;	/**< з них скільки підсумків секунди основного акселерометра */
 	size_t aux;	/**< з них скільки рядків додаткового акселерометра */
 	size_t gps;	/**< з них скільки рядків GPS */
+	size_t impacts; /**< з них скільки рядків FREE_FALL і IMPACT (входять і в events) */
 	size_t failed;	/**< скільки записів не вдалося обробити чи записати */
 };
 
@@ -73,6 +81,7 @@ struct log_writer_stats {
 struct log_writer {
 	struct ring_buffer *source_buffer;
 	struct motion_report detector;
+	struct impact_detector impact_detector;
 	int64_t last_aux_ms; /**< мітка часу останнього записаного рядка accel2 */
 	bool aux_seen;	     /**< чи писали вже рядок accel2 */
 	int fd;
@@ -108,6 +117,15 @@ int log_writer_format_line(char *out, size_t size, const char *source, int64_t t
  *         (MOTION_EVENT_NONE); -ENOSPC, якщо рядок не влізає в size
  */
 int log_writer_format_event(char *out, size_t size, int64_t timestamp_ms, enum motion_event event);
+
+/**
+ * @brief Складає рядок події FREE_FALL чи IMPACT.
+ *
+ * @return довжина рядка без завершального нуля; -EINVAL, якщо out чи event NULL, kind не подія
+ *         або |a| не скінченне число; -ENOSPC, якщо рядок не влізає в size
+ */
+int log_writer_format_impact(char *out, size_t size, int64_t timestamp_ms,
+			     const struct impact_event *event);
 
 /**
  * @brief Складає рядок-підсумок секунди основного акселерометра.

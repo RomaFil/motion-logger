@@ -758,6 +758,83 @@ static void test_unknown_source_counts_as_failed(void)
 	unlink(path);
 }
 
+static void test_format_impact_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct impact_event fall = {.kind = IMPACT_EVENT_FREE_FALL, .duration_ms = 120};
+	struct impact_event hit = {.kind = IMPACT_EVENT_IMPACT, .magnitude_g = 4.5};
+
+	CHECK(log_writer_format_impact(line, sizeof(line), 5100, &fall) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":5100,\"src\":\"accel\",\"event\":\"FREE_FALL\","
+			   "\"duration_ms\":120}\n") == 0);
+	CHECK(log_writer_format_impact(line, sizeof(line), 5400, &hit) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":5400,\"src\":\"accel\",\"event\":\"IMPACT\","
+			   "\"magnitude_g\":4.5000}\n") == 0);
+}
+
+static void test_format_impact_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+	struct impact_event none = {.kind = IMPACT_EVENT_NONE};
+	struct impact_event hit = {.kind = IMPACT_EVENT_IMPACT, .magnitude_g = 3.0};
+
+	CHECK(log_writer_format_impact(NULL, sizeof(line), 0, &hit) == -EINVAL);
+	CHECK(log_writer_format_impact(line, sizeof(line), 0, NULL) == -EINVAL);
+	CHECK(log_writer_format_impact(line, sizeof(line), 0, &none) == -EINVAL);
+	CHECK(log_writer_format_impact(tiny, sizeof(tiny), 0, &hit) == -ENOSPC);
+	hit.magnitude_g = NAN;
+	CHECK(log_writer_format_impact(line, sizeof(line), 0, &hit) == -EINVAL);
+}
+
+/* Наскрізно: спокій, падіння 300 мс (0 g), удар 4 g дають у лозі FREE_FALL, потім IMPACT. */
+static void test_fall_and_impact_reach_the_log(void)
+{
+	static struct sample storage[SMALL_CAPACITY * 64];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct sample item;
+	char path[TEMP_PATH_SIZE];
+	char text[4096] = {0};
+	size_t used = 0;
+	FILE *file;
+	int64_t time_ms = 0;
+	int i;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	for (i = 0; i < 100; i++, time_ms += MS_PER_SAMPLE) { /* 1 с спокою */
+		item = make_accel_item(time_ms, 0.0, 0.0, 1.0);
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+	for (i = 0; i < 30; i++, time_ms += MS_PER_SAMPLE) { /* 300 мс невагомості */
+		item = make_accel_item(time_ms, 0.0, 0.0, 0.0);
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+	item = make_accel_item(time_ms, 0.0, 0.0, 4.0); /* удар */
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+	CHECK(stats.impacts == 2);
+	CHECK(stats.failed == 0);
+
+	file = fopen(path, "r");
+	CHECK(file != NULL);
+	if (file != NULL) {
+		used = fread(text, 1, sizeof(text) - 1, file);
+		fclose(file);
+	}
+	text[used] = '\0';
+	CHECK(strstr(text, "\"event\":\"FREE_FALL\",\"duration_ms\":100}") != NULL);
+	CHECK(strstr(text, "\"event\":\"IMPACT\",\"magnitude_g\":4.0000}") != NULL);
+	CHECK(strstr(text, "FREE_FALL") < strstr(text, "IMPACT")); /* падіння раніше за удар */
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 int main(void)
 {
 	test_format_line_produces_exact_json();
@@ -785,6 +862,9 @@ int main(void)
 	test_aux_samples_are_written_once_per_second();
 	test_gps_samples_are_written_in_order();
 	test_unknown_source_counts_as_failed();
+	test_format_impact_produces_exact_json();
+	test_format_impact_rejects_bad_input();
+	test_fall_and_impact_reach_the_log();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);
