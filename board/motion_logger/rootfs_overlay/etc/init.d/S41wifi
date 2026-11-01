@@ -75,6 +75,8 @@ debug_snapshot() {
 	echo "--- wpa_supplicant.log (tail):"; tail -n 60 "$WPA_LOG" 2>&1
 	echo "--- ip addr:"; ip addr show "$IFACE" 2>&1
 	echo "--- wpa_cli status:"; wpa_cli -i "$IFACE" status 2>&1
+	echo "--- iw power_save / link:"; iw dev "$IFACE" get power_save 2>&1; iw dev "$IFACE" link 2>&1
+	echo "--- wpa_cli signal_poll:"; wpa_cli -i "$IFACE" signal_poll 2>&1
 	echo "--- wpa_cli scan_results:"; wpa_cli -i "$IFACE" scan_results 2>&1 | head -n 25
 	echo "--- syslog (wpa/udhcpc):"; grep -E 'wpa_supplicant|udhcpc|wifi' /var/log/messages 2>/dev/null | tail -n 25
 	echo
@@ -87,6 +89,15 @@ debug_later() {
 		prev=$t
 		debug_snapshot "після ${t} с" >>"$DEBUG_LOG" 2>&1
 		sync
+	done
+}
+
+# brcmfmac вмикає power save сам (dmesg: "power save enabled"). Плата, що дрімає між кадрами, не відповідає на
+# ARP і з ПК "зникає", хоча DHCP-оренду має. Вимикаємо кілька разів: налаштування застосовується після асоціації.
+wifi_power_save_off() {
+	for t in 5 10 20 40; do
+		sleep "$t"
+		iw dev "$IFACE" set power_save off 2>/dev/null
 	done
 }
 
@@ -135,6 +146,7 @@ start() {
 	if ! is_running; then
 		echo "$NAME: wpa_supplicant одразу завершився, див. $WPA_LOG" >&2
 	fi
+	wifi_power_save_off &
 	# -b: якщо адреси ще нема (точка доступу не підключила), лишається у фоні й повторює спроби.
 	udhcpc -i "$IFACE" -b -p "$DHCP_PID" -x "hostname:$HOSTNAME_DHCP" -t 3 -T 2 -A 5 -S
 	echo "$NAME: started ($IFACE)"

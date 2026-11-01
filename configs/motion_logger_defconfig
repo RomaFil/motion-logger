@@ -35,6 +35,8 @@ BR2_PACKAGE_WIRELESS_REGDB=y
 BR2_PACKAGE_WPA_SUPPLICANT=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
+# iw: вимкнути енергозбереження wlan0 (brcmfmac вмикає його сам, плата тоді не відповідає на ARP) і читати сигнал
+BR2_PACKAGE_IW=y
 # Діагностичні утиліти (i2cdetect, gpiodetect, gpioinfo); лише для навчального образу: викладач 22.10.2026 радив
 # прибрати їх із продуктового (крок G0 трекера)
 BR2_PACKAGE_I2C_TOOLS=y

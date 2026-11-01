@@ -12,6 +12,7 @@
   на файл Pi 4. `post-image.sh` кладе `~/workspace/wifi.secret` у boot-розділ образу. Подробиці: `docs/wifi.md`.
   Після першої збірки: `wlan0` має адресу, SSH по Wi-Fi працює без кабелю.
   `S41wifi` також пише знімки стану Wi-Fi у `/boot/wifi-debug.log` (читається з Windows без консолі).
+  Далі: у `defconfig` пакет `iw`, `S41wifi` вимикає `power_save` на `wlan0` (при увімкненому плата мала оренду DHCP, але не відповідала з ПК).
 
 ## 29.10.2026
 
