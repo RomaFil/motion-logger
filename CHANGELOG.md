@@ -11,6 +11,7 @@
   запускає `wpa_supplicant` та `udhcpc` на `wlan0`; `brcmfmac` додано в `modules-load.d`; NVRAM Pi 5 це симлінк
   на файл Pi 4. `post-image.sh` кладе `~/workspace/wifi.secret` у boot-розділ образу. Подробиці: `docs/wifi.md`.
   Після першої збірки: `wlan0` має адресу, SSH по Wi-Fi працює без кабелю.
+  `S41wifi` також пише знімки стану Wi-Fi у `/boot/wifi-debug.log` (читається з Windows без консолі).
 
 ## 29.10.2026
 

@@ -37,6 +37,12 @@ dmesg | grep -i brcmfmac          # завантаження прошивки (�
 grep -E "wpa_supplicant|udhcpc" /var/log/messages
 ```
 
+## Діагностика без консолі
+
+Через 25 і 90 с після старту `S41wifi` дописує знімок стану (модулі, `dmesg` про brcmfmac, адреса, `wpa_cli status`,
+список мереж, журнал) у `/boot/wifi-debug.log`. Файл видно з Windows, коли картку вставлено в ПК: консоль і Ethernet
+не потрібні. Вимкнути: `DEBUG=0` у `wifi.txt`.
+
 ## Обмеження
 
 - WPA3 у `wpa_supplicant` не ввімкнено (це тягне OpenSSL). Мережа WPA2 або змішана WPA2/WPA3 працює.

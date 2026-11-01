@@ -16,10 +16,14 @@ DHCP_PID=/run/udhcpc.$IFACE.pid
 # Скільки секунд чекати появи wlan0 після завантаження модуля brcmfmac (прошивка вантажиться ~2 с).
 IFACE_TIMEOUT=20
 HOSTNAME_DHCP=motion-logger
+# Діагностика без консолі: через DEBUG_DELAYS секунд після старту пишемо стан Wi-Fi у /boot/wifi-debug.log
+# (файл видно з Windows, коли картку вставлено в ПК). Вимкнути: DEBUG=0 у wifi.txt.
+DEBUG_LOG=$BOOT_DIR/wifi-debug.log
+DEBUG_DELAYS="25 90"
 
 # Значення ключа з wifi.txt (перший збіг, без CR від Windows-редактора).
 key() {
-	sed -n "s/^$1=//p" "$CONF_SRC" | head -n 1 | tr -d '\r'
+	sed -n "s/^$1=//p" "$CONF_SRC" 2>/dev/null | head -n 1 | tr -d '\r'
 }
 
 mount_boot() {
@@ -55,6 +59,31 @@ make_conf() {
 	grep -q '^network=' "$CONF"
 }
 
+# Один знімок стану для wifi-debug.log; викликається з фонового підпроцесу.
+debug_snapshot() {
+	echo "=== $(date) | uptime: $(cut -d' ' -f1 /proc/uptime) s | $1"
+	echo "--- net:"; ls /sys/class/net
+	echo "--- wlan0 mac: $(cat /sys/class/net/$IFACE/address 2>/dev/null)"
+	echo "--- lsmod (net/wifi):"; lsmod | grep -E 'brcm|cfg80211|rfkill|mmc|sdhci'
+	echo "--- dmesg (wifi):"; dmesg | grep -iE 'brcm|wlan|mmc[0-9]|sdio|firmware|cfg80211|regulatory|wifi' | tail -n 40
+	echo "--- processes:"; ps | grep -E 'wpa_supplicant|udhcpc|dropbear' | grep -v grep
+	echo "--- ip addr:"; ip addr show "$IFACE" 2>&1
+	echo "--- wpa_cli status:"; wpa_cli -i "$IFACE" status 2>&1
+	echo "--- wpa_cli scan_results:"; wpa_cli -i "$IFACE" scan_results 2>&1 | head -n 25
+	echo "--- syslog (wpa/udhcpc):"; grep -E 'wpa_supplicant|udhcpc|wifi' /var/log/messages 2>/dev/null | tail -n 25
+	echo
+}
+
+debug_later() {
+	prev=0
+	for t in $DEBUG_DELAYS; do
+		sleep $((t - prev))
+		prev=$t
+		debug_snapshot "після ${t} с" >>"$DEBUG_LOG" 2>&1
+		sync
+	done
+}
+
 is_running() {
 	[ -f "$WPA_PID" ] && kill -0 "$(cat "$WPA_PID")" 2>/dev/null
 }
@@ -68,6 +97,11 @@ start() {
 	if ! mount_boot; then
 		echo "$NAME: не вдалося змонтувати $BOOT_DEV на $BOOT_DIR" >&2
 		return 0
+	fi
+	# Фоновий підпроцес переживе return з start (init не чекає); лог перезаписується при кожному старті.
+	if [ "$(key DEBUG)" != "0" ]; then
+		: >"$DEBUG_LOG"
+		debug_later &
 	fi
 	if [ ! -r "$CONF_SRC" ]; then
 		echo "$NAME: нема $CONF_SRC, Wi-Fi не вмикаю (створіть файл за зразком wifi.txt.example)" >&2
