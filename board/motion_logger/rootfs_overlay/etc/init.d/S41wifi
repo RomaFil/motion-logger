@@ -12,6 +12,7 @@ CONF_SRC=$BOOT_DIR/wifi.txt
 # Робочий конфіг wpa_supplicant лежить у tmpfs (/run): пароль не потрапляє у файлову систему образу.
 CONF=/run/wpa_supplicant.conf
 WPA_PID=/run/wpa_supplicant.pid
+WPA_LOG=/run/wpa_supplicant.log
 DHCP_PID=/run/udhcpc.$IFACE.pid
 # Скільки секунд чекати появи wlan0 після завантаження модуля brcmfmac (прошивка вантажиться ~2 с).
 IFACE_TIMEOUT=20
@@ -66,7 +67,12 @@ debug_snapshot() {
 	echo "--- wlan0 mac: $(cat /sys/class/net/$IFACE/address 2>/dev/null)"
 	echo "--- lsmod (net/wifi):"; lsmod | grep -E 'brcm|cfg80211|rfkill|mmc|sdhci'
 	echo "--- dmesg (wifi):"; dmesg | grep -iE 'brcm|wlan|mmc[0-9]|sdio|firmware|cfg80211|regulatory|wifi' | tail -n 40
-	echo "--- processes:"; ps | grep -E 'wpa_supplicant|udhcpc|dropbear' | grep -v grep
+	echo "--- dmesg (tail):"; dmesg | tail -n 15
+	echo "--- processes (all):"; ps
+	echo "--- binaries:"; ls -l /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli 2>&1; wpa_supplicant -v 2>&1 | head -n 2
+	echo "--- /run:"; ls -l /run /run/wpa_supplicant 2>&1
+	echo "--- wpa conf (psk hidden):"; sed 's/psk=.*/psk=<hidden>/' "$CONF" 2>&1
+	echo "--- wpa_supplicant.log (tail):"; tail -n 60 "$WPA_LOG" 2>&1
 	echo "--- ip addr:"; ip addr show "$IFACE" 2>&1
 	echo "--- wpa_cli status:"; wpa_cli -i "$IFACE" status 2>&1
 	echo "--- wpa_cli scan_results:"; wpa_cli -i "$IFACE" scan_results 2>&1 | head -n 25
@@ -121,11 +127,14 @@ start() {
 		echo "$NAME: інтерфейс $IFACE не з'явився за ${IFACE_TIMEOUT} с (перевірте dmesg | grep brcmfmac)" >&2
 		return 0
 	fi
-	# -B у фон, -s: журнал у syslog (читати: cat /var/log/messages).
-	wpa_supplicant -B -s -i "$IFACE" -c "$CONF" -P "$WPA_PID" || {
-		echo "$NAME: wpa_supplicant не запустився" >&2
-		return 0
-	}
+	# Без -B: у знімку 01.11.2026 wpa_supplicant з -B -s не лишався серед процесів і мовчав. Тепер він працює
+	# як звичайний фоновий процес оболонки, а його вивід (-d: налагодження, ключі не друкуються) іде у $WPA_LOG.
+	wpa_supplicant -d -D nl80211 -i "$IFACE" -c "$CONF" >"$WPA_LOG" 2>&1 &
+	echo $! >"$WPA_PID"
+	sleep 1
+	if ! is_running; then
+		echo "$NAME: wpa_supplicant одразу завершився, див. $WPA_LOG" >&2
+	fi
 	# -b: якщо адреси ще нема (точка доступу не підключила), лишається у фоні й повторює спроби.
 	udhcpc -i "$IFACE" -b -p "$DHCP_PID" -x "hostname:$HOSTNAME_DHCP" -t 3 -T 2 -A 5 -S
 	echo "$NAME: started ($IFACE)"
