@@ -213,8 +213,9 @@ static void test_backwards_time_and_bad_values_are_rejected(void)
 }
 
 /*
- * Вікно 1 відлік, поріг 0,25 g: відлік z = 1,5 g рухомий, z = 1,0 g спокійний. Рівно 50 з 100
- * відліків рухомі: "більш ніж половина" не виконується, тож секунда НЕ рухома.
+ * Вікно 1 відлік, поріг 0,25 g. Перші 50 відліків (z = 1,5 g) задають середнє довжини вектора і
+ * спокійні, решта 50 (z = 1,0 g) далі від нього на 0,5 g, тож рухомі. Рівно 50 з 100 відліків
+ * рухомі: "більш ніж половина" не виконується, тож секунда НЕ рухома.
  */
 static void test_exactly_half_moving_samples_is_not_a_moving_second(void)
 {
@@ -237,7 +238,10 @@ static void test_exactly_half_moving_samples_is_not_a_moving_second(void)
 	CHECK(!update.row.moving);
 }
 
-/* 100 відліків з відхиленням 0,25 g (z = 1,25): середнє секунди рівно 0,25, а не сума 25. */
+/*
+ * 100 відліків, що чергуються між 1,25 g і 0,75 g навколо середнього 1,0 g: відхилення ≈ 0,25 g,
+ * тож середнє секунди ≈ 0,25 (середнє зсувається на частки відсотка), а не сума ≈ 25.
+ */
 static void test_second_average_is_a_mean_not_a_sum(void)
 {
 	struct motion_report report;
@@ -246,14 +250,16 @@ static void test_second_average_is_a_mean_not_a_sum(void)
 
 	CHECK(motion_report_init(&report, 1, 0.1, 1) == 0);
 	for (i = 0; i < SAMPLE_RATE_HZ; i++) {
-		struct accel_sample sample = {.time_ms = i * MSEC_PER_SAMPLE, .z_g = 1.25};
+		/* Перший відлік 1,0 g задає середнє, далі чергуємо 1,25 і 0,75. */
+		double z = i == 0 ? 1.0 : (i % 2 == 1 ? 1.25 : 0.75);
+		struct accel_sample sample = {.time_ms = i * MSEC_PER_SAMPLE, .z_g = z};
 
 		CHECK(motion_report_add_sample(&report, &sample, &update) == 0);
 	}
 	CHECK(motion_report_finish(&report, &update) == 0);
 
 	CHECK(update.row_ready);
-	CHECK(nearly_equal(update.row.average_deviation_g, 0.25));
+	CHECK(update.row.average_deviation_g > 0.24 && update.row.average_deviation_g < 0.26);
 	CHECK(update.row.moving);
 }
 
