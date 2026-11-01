@@ -12,6 +12,7 @@
 | Підключення до мережі | `wpa_supplicant` (nl80211), скрипт `etc/init.d/S41wifi` |
 | Адреса | `udhcpc` з BusyBox, ім'я хоста для роутера `motion-logger` |
 | Країна | необов'язково: `COUNTRY=UA` у `wifi.txt` (за замовчуванням не задається), база `wireless-regdb` |
+| Handshake WPA2 | `feature_disable=0x82000` у `etc/modprobe.d/brcmfmac.conf`: без нього wpa_supplicant 2.12 чекає від brcmfmac `port authorized` і розриває з'єднання через 10 с |
 | Енергозбереження | `iw dev wlan0 set power_save off` у `S41wifi`; `options brcmfmac roamoff=1` у `etc/modprobe.d/brcmfmac.conf` |
 
 ## Де лежать пароль і назва мережі
