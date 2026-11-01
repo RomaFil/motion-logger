@@ -55,6 +55,8 @@ make_script() {
 		-e "s|^LOGFILE=.*|LOGFILE=$WORK/test.log|" \
 		-e "s|^DEBUG_TTY=.*|DEBUG_TTY=$WORK/no_such_tty|" \
 		-e "s|^STOP_TIMEOUT=.*|STOP_TIMEOUT=1|" \
+		-e "s|^IIO_ROOT=.*|IIO_ROOT=$WORK/iio|" \
+		-e "s|^IIO_WAIT=.*|IIO_WAIT=1|" \
 		-e "s|/etc/default/\$NAME|$WORK/default|g" \
 		"$SCRIPT" >"$WORK/S99"
 	chmod +x "$WORK/S99"
@@ -111,6 +113,29 @@ rm -f "$WORK/good.args"
 sleep 1
 check "демон отримав параметри" grep -qx -e '--replay /x.csv --speed 50' "$WORK/good.args"
 "$WORK/S99" stop >/dev/null 2>&1
+rm -f "$WORK/default"
+
+echo "S99motion_logger: датчики за ім'ям (@ім'я) і частота датчика"
+# Фальшиве дерево IIO: номери навмисно в «неправильному» порядку, щоб було видно, що шукаємо за ім'ям.
+mkdir -p "$WORK/iio/iio:device0" "$WORK/iio/iio:device1"
+echo adxl345 >"$WORK/iio/iio:device0/name"
+echo mpu6050 >"$WORK/iio/iio:device1/name"
+echo 50 >"$WORK/iio/iio:device1/sampling_frequency"
+printf 'MOTION_LOGGER_OPTS="--iio @mpu6050 --iio-rate 100 --iio-aux @adxl345 --log /x.jsonl"\n' >"$WORK/default"
+printf 'MOTION_LOGGER_IIO_RATES="mpu6050:100"\n' >>"$WORK/default"
+rm -f "$WORK/good.args"
+make_script "$WORK/good"
+check "start із @ім'ям = 0" rc 0 "$WORK/S99" start
+sleep 1
+check "@mpu6050 і @adxl345 замінено на каталоги за ім'ям" grep -qx -e "--iio $WORK/iio/iio:device1 --iio-rate 100 --iio-aux $WORK/iio/iio:device0 --log /x.jsonl" "$WORK/good.args"
+check "частота MPU6050 виставлена в sampling_frequency" grep -qx 100 "$WORK/iio/iio:device1/sampling_frequency"
+check "датчик, якого нема в списку частот, не чіпаний" test ! -e "$WORK/iio/iio:device0/sampling_frequency"
+"$WORK/S99" stop >/dev/null 2>&1
+
+printf 'MOTION_LOGGER_OPTS="--iio @nosuch --log /x.jsonl"\n' >"$WORK/default"
+check "невідоме ім'я датчика: start = 1" rc 1 "$WORK/S99" start
+check "невідоме ім'я: процес не запущено" test ! -e "$WORK/test.pid"
+check "невідоме ім'я: status = 3" rc 3 "$WORK/S99" status
 rm -f "$WORK/default"
 
 echo "S99motion_logger: демон, що ігнорує SIGTERM"
