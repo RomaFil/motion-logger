@@ -3,6 +3,15 @@
 Фіксуємо те, що впливає на збірку образу чи поведінку на платі (вимога менторів Ajax: суттєві зміни збірки
 описувати окремо). Дрібні правки коду дивіться в `git log`.
 
+## 01.11.2026
+
+- **Образ (не збирався, на платі не перевірявся; гілка `feature/wifi`):** Wi-Fi замість Ethernet. У `defconfig`:
+  `linux-firmware` (`BRCM_BCM43XXX`), `wireless-regdb`, `wpa_supplicant` (nl80211, `wpa_cli`). Новий скрипт
+  `S41wifi` читає мережі з `/boot/wifi.txt` (FAT-розділ картки, у git його немає), генерує конфіг у `/run` і
+  запускає `wpa_supplicant` та `udhcpc` на `wlan0`; `brcmfmac` додано в `modules-load.d`; NVRAM Pi 5 це симлінк
+  на файл Pi 4. `post-image.sh` кладе `~/workspace/wifi.secret` у boot-розділ образу. Подробиці: `docs/wifi.md`.
+  Після першої збірки: `wlan0` має адресу, SSH по Wi-Fi працює без кабелю.
+
 ## 29.10.2026
 
 - **Образ (не збирався, на платі не перевірявся):** overlay `motion-logger-sensors.dtbo` (MPU6050 на `i2c1`

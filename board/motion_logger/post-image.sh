@@ -14,6 +14,18 @@ GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
 mkdir -p "${BINARIES_DIR}/rpi-firmware"
 cp "${BOARD_DIR}/config.txt" "${BOARD_DIR}/cmdline.txt" "${BINARIES_DIR}/rpi-firmware/"
 
+# Wi-Fi: /etc/init.d/S41wifi читає мережі з wifi.txt на розділі boot. Файл поза git: беремо його з машини
+# збірки ($WIFI_SECRET або ~/workspace/wifi.secret) і кладемо на boot-розділ образу. Нема файлу, образ
+# збереться без Wi-Fi-налаштувань (покласти wifi.txt на картку вручну, зразок board/motion_logger/wifi.txt.example).
+WIFI_SECRET="${WIFI_SECRET:-${HOME}/workspace/wifi.secret}"
+rm -f "${BINARIES_DIR}/rpi-firmware/wifi.txt"
+if [ -r "${WIFI_SECRET}" ]; then
+	install -m 600 "${WIFI_SECRET}" "${BINARIES_DIR}/rpi-firmware/wifi.txt"
+	echo "post-image: wifi.txt на boot-розділі взято з ${WIFI_SECRET} (вміст не друкуємо)"
+else
+	echo "post-image: УВАГА: нема ${WIFI_SECRET}, у образі не буде wifi.txt" >&2
+fi
+
 # Pi 5 із чипом BCM2712 D0 (зокрема модель 16 ГБ): прошивка шукає /overlays/bcm2712d0.dtbo.
 # Оверлей збирається разом із ядром, але Buildroot його в образ не кладе, тому беремо з каталогу ядра.
 OVL_SRC=$(ls "${BUILD_DIR}"/linux-*/arch/arm/boot/dts/overlays/bcm2712d0.dtbo 2>/dev/null | head -n 1)
