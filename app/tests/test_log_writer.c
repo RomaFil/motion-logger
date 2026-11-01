@@ -713,7 +713,7 @@ static void test_raw_dump_has_every_accel_sample(void)
 	struct ring_buffer rb;
 	struct log_writer lw;
 	struct log_writer_stats stats;
-	struct log_writer_options options;
+	struct log_writer_options options = {0};
 	char line[LOG_WRITER_LINE_SIZE];
 	char path[TEMP_PATH_SIZE];
 	char raw_path[TEMP_PATH_SIZE];
@@ -777,8 +777,57 @@ static void test_raw_dump_reports_unwritable_path(void)
 	unlink(path);
 }
 
+/* Скільки подій запам'ятовує перевірка гачка. */
+#define SEEN_EVENTS_MAX 8
+
+struct seen_events {
+	enum motion_event events[SEEN_EVENTS_MAX];
+	int count;
+};
+
+static void remember_event(void *context, enum motion_event event)
+{
+	struct seen_events *seen = context;
+
+	if (seen->count < SEEN_EVENTS_MAX) {
+		seen->events[seen->count] = event;
+	}
+	seen->count++;
+}
+
+/* Гачок on_event отримує кожну подію руху в тому порядку, у якому вона потрапила в лог. */
+static void test_event_hook_sees_start_then_stop(void)
+{
+	static struct sample
+	    storage[(STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS) * ACCEL_RATE_HZ];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct seen_events seen = {.count = 0};
+	struct log_writer_options options = {.on_event = remember_event, .event_context = &seen};
+	int64_t moving_start_ms;
+	int64_t moving_end_ms;
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	fill_still_moving_still(&rb, &moving_start_ms, &moving_end_ms);
+
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.events == 2);
+	CHECK(seen.count == 2);
+	CHECK(seen.events[0] == MOTION_EVENT_START);
+	CHECK(seen.events[1] == MOTION_EVENT_STOP);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 int main(void)
 {
+	test_event_hook_sees_start_then_stop();
 	test_raw_dump_has_every_accel_sample();
 	test_raw_dump_reports_unwritable_path();
 	test_format_line_produces_exact_json();

@@ -201,6 +201,8 @@ int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const c
 	}
 
 	lw->raw_fd = -1;
+	lw->on_event = options != NULL ? options->on_event : NULL;
+	lw->event_context = options != NULL ? options->event_context : NULL;
 	if (options != NULL && options->raw_path != NULL) {
 		error = open_raw_file(options->raw_path);
 		if (error < 0) {
@@ -387,6 +389,9 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 	write_line(lw, line, length);
 	if (length >= 0) {
 		lw->stats.events++;
+	}
+	if (lw->on_event != NULL) {
+		lw->on_event(lw->event_context, update.event);
 	}
 }
 

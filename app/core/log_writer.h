@@ -75,6 +75,13 @@ struct log_writer_options {
 	 * analyze_recording і побачити ті самі події, що й у логу.
 	 */
 	const char *raw_path;
+	/**
+	 * Викликається з потоку записувача одразу після того, як подію руху записано в лог, або
+	 * NULL. Так світлодіоди етапів збігаються з рядками MOVE_START / MOVE_STOP. Функція має
+	 * працювати швидко: поки вона виконується, записувач не забирає відліки з буфера.
+	 */
+	void (*on_event)(void *context, enum motion_event event);
+	void *event_context; /**< передається в on_event першим аргументом */
 };
 
 /** @brief Стан записувача. Поля змінюй лише через функції log_writer_*. */
@@ -85,6 +92,8 @@ struct log_writer {
 	bool aux_seen;	     /**< чи писали вже рядок accel2 */
 	int fd;
 	int raw_fd; /**< файл сирих відліків, або -1 */
+	void (*on_event)(void *context, enum motion_event event); /**< див. options, або NULL */
+	void *event_context;
 	pthread_t thread;
 	atomic_bool stop_requested;
 	struct log_writer_stats stats;

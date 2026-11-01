@@ -18,6 +18,8 @@
  *   --log <файл>         JSON Lines (див. log_writer.h); без нього відліки лише збираються в буфері
  *   --dump-raw <файл>    додатково пише СИРІ відліки основного акселерометра (t_ms,x_g,y_g,z_g)
  *                        для analyze_recording; потребує --log
+ *   --stage-leds <чіп>   три світлодіоди етапів руху (libgpiod, збірка GPIOD=1), наприклад
+ * gpiochip0: світить 1 до першого руху, 2 під час руху, 3 після зупинки; потребує --log
  *
  * Без жодного джерела програма нічого не читає й одразу завершується успішно: так її запускає
  * скрипт автозапуску образу, коли в /etc/default/motion_logger параметрів нема.
@@ -46,7 +48,11 @@
 #include "ring_buffer.h"
 #include "sample_reader.h"
 #include "sensor_reader.h"
+#include "stage_indicator.h"
 #include "uart_port.h"
+#ifdef HAVE_GPIOD
+#include "gpiod_stage.h"
+#endif
 
 #define BUFFER_CAPACITY 4096
 #define MAX_TASKS 3
@@ -61,6 +67,7 @@
 #define GPS_BAUD_OPTION "--gps-baud"
 #define LOG_OPTION "--log"
 #define DUMP_RAW_OPTION "--dump-raw"
+#define STAGE_LEDS_OPTION "--stage-leds"
 
 #define REALTIME_SPEED 1.0
 #define DEFAULT_IIO_RATE_HZ 100
@@ -76,8 +83,9 @@ struct options {
 	unsigned int iio_rate_hz;
 	const char *gps_path; /* NULL, якщо --gps не задано */
 	unsigned int gps_baud;
-	const char *log_path; /* NULL, якщо --log не задано */
-	const char *raw_path; /* NULL, якщо --dump-raw не задано */
+	const char *log_path;	/* NULL, якщо --log не задано */
+	const char *raw_path;	/* NULL, якщо --dump-raw не задано */
+	const char *stage_chip; /* мікросхема світлодіодів етапів, або NULL */
 };
 
 /* Скільки записів прийшло від джерела і скільки з них не влізло в буфер. */
@@ -118,6 +126,9 @@ static void *task_thread(void *argument);
 static int run_stdin_task(struct task *task);
 static int run_sensor_task(struct task *task);
 static int run_gps_task(struct task *task);
+#ifdef HAVE_GPIOD
+static void show_stage_on_event(void *context, enum motion_event event);
+#endif
 
 int main(int argc, char **argv)
 {
@@ -128,6 +139,11 @@ int main(int argc, char **argv)
 	struct log_writer writer;
 	struct options options;
 	bool writer_started = false;
+#ifdef HAVE_GPIOD
+	struct gpiod_stage stage_driver;
+	struct stage_indicator stage;
+	bool stage_open = false;
+#endif
 	int result;
 
 	if (parse_options(argc, argv, &options) < 0) {
@@ -152,9 +168,38 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
+	if (options.stage_chip != NULL) {
+#ifdef HAVE_GPIOD
+		result = gpiod_stage_open(&stage_driver, options.stage_chip);
+		if (result < 0) {
+			fprintf(stderr, "motion_logger: leds %s: %s\n", options.stage_chip,
+				strerror(-result));
+			goto cleanup;
+		}
+		stage_open = true;
+		result = stage_indicator_init(&stage, &stage_driver.base);
+		if (result < 0) {
+			fprintf(stderr, "motion_logger: leds %s: %s\n", options.stage_chip,
+				strerror(-result));
+			goto cleanup;
+		}
+#else
+		fprintf(stderr, "motion_logger: %s needs a build with libgpiod (make GPIOD=1)\n",
+			STAGE_LEDS_OPTION);
+		result = -ENOSYS;
+		goto cleanup;
+#endif
+	}
+
 	if (options.log_path != NULL) {
 		struct log_writer_options writer_options = {.raw_path = options.raw_path};
 
+#ifdef HAVE_GPIOD
+		if (stage_open) {
+			writer_options.on_event = show_stage_on_event;
+			writer_options.event_context = &stage;
+		}
+#endif
 		result = log_writer_start_with(&writer, &buffer, options.log_path, &writer_options);
 		if (result < 0) {
 			fprintf(stderr, "motion_logger: log %s: %s\n", options.log_path,
@@ -183,9 +228,24 @@ int main(int argc, char **argv)
 	       ring_buffer_count(&buffer));
 
 cleanup:
+#ifdef HAVE_GPIOD
+	if (stage_open) {
+		stage_driver.base.close(&stage_driver.base);
+	}
+#endif
 	ring_buffer_destroy(&buffer);
 	return result < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }
+
+#ifdef HAVE_GPIOD
+/* Гачок записувача логу: світлодіоди показують етап руху одразу після рядка події в лозі. */
+static void show_stage_on_event(void *context, enum motion_event event)
+{
+	if (stage_indicator_on_event(context, event) < 0) {
+		fprintf(stderr, "motion_logger: leds: cannot show the stage\n");
+	}
+}
+#endif
 
 /*
  * Розбирає аргументи; повертає 0, або -EINVAL, якщо аргумент невідомий, бракує значення,
@@ -236,6 +296,8 @@ static int parse_options(int argc, char **argv, struct options *options)
 			options->log_path = argv[++i];
 		} else if (has_value && strcmp(argv[i], DUMP_RAW_OPTION) == 0) {
 			options->raw_path = argv[++i];
+		} else if (has_value && strcmp(argv[i], STAGE_LEDS_OPTION) == 0) {
+			options->stage_chip = argv[++i];
 		} else {
 			return -EINVAL;
 		}
@@ -257,6 +319,9 @@ static int parse_options(int argc, char **argv, struct options *options)
 	}
 	if (options->raw_path != NULL && options->log_path == NULL) {
 		return -EINVAL; /* сирі відліки пише той самий записувач, що й лог */
+	}
+	if (options->stage_chip != NULL && options->log_path == NULL) {
+		return -EINVAL; /* події руху, за якими міняються світлодіоди, ловить записувач */
 	}
 
 	return 0;
@@ -302,9 +367,10 @@ static void print_usage(const char *program)
 	fprintf(
 	    stderr,
 	    "usage: %s [%s | %s file [%s factor] | %s dir [%s hz]] [%s dir] [%s port [%s baud]] "
-	    "[%s file [%s file]]\n",
+	    "[%s file [%s file] [%s chip]]\n",
 	    program, STDIN_OPTION, REPLAY_OPTION, SPEED_OPTION, IIO_OPTION, IIO_RATE_OPTION,
-	    IIO_AUX_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION, DUMP_RAW_OPTION);
+	    IIO_AUX_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION, DUMP_RAW_OPTION,
+	    STAGE_LEDS_OPTION);
 }
 
 static bool has_any_source(const struct options *options)

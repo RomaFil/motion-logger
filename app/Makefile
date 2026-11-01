@@ -3,6 +3,7 @@
 #   make CROSS_COMPILE=aarch64-linux-gnu-   збірка для Raspberry Pi 5
 #   make STATIC=1                           статична збірка (без залежності від libc на цілі)
 #   make DEBUG=1                            з відладочною інформацією
+#   make GPIOD=1                            зі світлодіодами етапів руху (libgpiod 1.x), --stage-leds
 #   make test                               зібрати й запустити тести (лише на цьому комп'ютері)
 #   make SANITIZE=address,undefined test    те саме з перевіркою пам'яті (ASan + UBSan; make clean до і після)
 #   make test-tsan                          те саме з ThreadSanitizer (перевірка гонок даних)
@@ -50,7 +51,15 @@ TARGET := $(BUILD)/motion_logger
 SRCS := main.c core/ring_buffer.c core/sample_reader.c core/sensor_reader.c core/log_writer.c \
 	core/io_util.c core/motion_report.c core/motion_events.c core/motion_filter.c core/accel_csv.c \
 	drivers/csv_player.c drivers/iio_accel.c drivers/uart_port.c core/gps_reader.c core/nmea.c \
-	core/nmea_parser.c
+	core/nmea_parser.c core/stage_indicator.c
+
+# Світлодіоди етапів руху через libgpiod 1.x: make GPIOD=1. Потрібні libgpiod і її заголовки на цілі
+# (у Buildroot їх дає пакет libgpiod). Без GPIOD=1 драйвер не збирається, а --stage-leds видає зрозумілу помилку.
+ifeq ($(GPIOD),1)
+  SRCS += drivers/gpiod_stage.c
+  override CFLAGS += -DHAVE_GPIOD
+  GPIOD_LIBS := -lgpiod
+endif
 OBJS := $(addprefix $(BUILD)/,$(SRCS:.c=.o))
 
 # Імітатор датчика (пише числа в stdout раз на 10 мс): окрема програма, core-файли їй не потрібні.
@@ -68,7 +77,7 @@ TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/t
 	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser $(BUILD)/test_motion_filter \
 	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report \
 	$(BUILD)/test_sensor_reader $(BUILD)/test_csv_player $(BUILD)/test_iio_accel \
-	$(BUILD)/test_gps_reader
+	$(BUILD)/test_gps_reader $(BUILD)/test_stage_indicator
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
 	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
@@ -81,6 +90,7 @@ TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader
 	$(BUILD)/tests/test_csv_player.o $(BUILD)/drivers/csv_player.o \
 	$(BUILD)/tests/test_iio_accel.o $(BUILD)/drivers/iio_accel.o \
 	$(BUILD)/tests/test_gps_reader.o $(BUILD)/core/gps_reader.o $(BUILD)/drivers/uart_port.o \
+	$(BUILD)/tests/test_stage_indicator.o $(BUILD)/core/stage_indicator.o \
 	$(ANALYZE_OBJS)
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
@@ -93,7 +103,7 @@ FORMAT_FILES := $(wildcard main.c core/*.c core/*.h drivers/*.c drivers/*.h inte
 all: $(TARGET) $(SIM_TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^ -lm
+	$(CC) $(LDFLAGS) -o $@ $^ -lm $(GPIOD_LIBS)
 
 $(SIM_TARGET): $(SIM_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -132,6 +142,9 @@ $(BUILD)/test_iio_accel: $(BUILD)/tests/test_iio_accel.o $(BUILD)/drivers/iio_ac
 $(BUILD)/test_gps_reader: $(BUILD)/tests/test_gps_reader.o $(BUILD)/core/gps_reader.o \
 		$(BUILD)/core/ring_buffer.o $(BUILD)/core/io_util.o $(BUILD)/core/nmea_parser.o \
 		$(BUILD)/core/nmea.o $(BUILD)/drivers/uart_port.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_stage_indicator: $(BUILD)/tests/test_stage_indicator.o $(BUILD)/core/stage_indicator.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_nmea: $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o
@@ -222,6 +235,11 @@ $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_wr
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_log_writer.c core/log_writer.c core/io_util.c \
 		core/ring_buffer.c core/motion_report.c core/motion_events.c core/motion_filter.c -lm
+
+$(BUILD)/test_stage_indicator_tsan: tests/test_stage_indicator.c tests/check.h core/stage_indicator.c \
+		core/stage_indicator.h interfaces/stage_io.h core/motion_events.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_stage_indicator.c core/stage_indicator.c
 
 $(BUILD)/test_nmea_tsan: tests/test_nmea.c tests/check.h core/nmea.c core/nmea.h
 	@mkdir -p $(@D)
