@@ -16,6 +16,8 @@
  *   --gps-baud <бод>     швидкість порту (за замовчуванням 9600)
  * Результат:
  *   --log <файл>         JSON Lines (див. log_writer.h); без нього відліки лише збираються в буфері
+ *   --dump-raw <файл>    додатково пише СИРІ відліки основного акселерометра (t_ms,x_g,y_g,z_g)
+ *                        для analyze_recording; потребує --log
  *
  * Без жодного джерела програма нічого не читає й одразу завершується успішно: так її запускає
  * скрипт автозапуску образу, коли в /etc/default/motion_logger параметрів нема.
@@ -58,6 +60,7 @@
 #define GPS_OPTION "--gps"
 #define GPS_BAUD_OPTION "--gps-baud"
 #define LOG_OPTION "--log"
+#define DUMP_RAW_OPTION "--dump-raw"
 
 #define REALTIME_SPEED 1.0
 #define DEFAULT_IIO_RATE_HZ 100
@@ -74,6 +77,7 @@ struct options {
 	const char *gps_path; /* NULL, якщо --gps не задано */
 	unsigned int gps_baud;
 	const char *log_path; /* NULL, якщо --log не задано */
+	const char *raw_path; /* NULL, якщо --dump-raw не задано */
 };
 
 /* Скільки записів прийшло від джерела і скільки з них не влізло в буфер. */
@@ -149,7 +153,9 @@ int main(int argc, char **argv)
 	}
 
 	if (options.log_path != NULL) {
-		result = log_writer_start(&writer, &buffer, options.log_path);
+		struct log_writer_options writer_options = {.raw_path = options.raw_path};
+
+		result = log_writer_start_with(&writer, &buffer, options.log_path, &writer_options);
 		if (result < 0) {
 			fprintf(stderr, "motion_logger: log %s: %s\n", options.log_path,
 				strerror(-result));
@@ -228,6 +234,8 @@ static int parse_options(int argc, char **argv, struct options *options)
 			baud_given = true;
 		} else if (has_value && strcmp(argv[i], LOG_OPTION) == 0) {
 			options->log_path = argv[++i];
+		} else if (has_value && strcmp(argv[i], DUMP_RAW_OPTION) == 0) {
+			options->raw_path = argv[++i];
 		} else {
 			return -EINVAL;
 		}
@@ -246,6 +254,9 @@ static int parse_options(int argc, char **argv, struct options *options)
 	}
 	if (baud_given && options->gps_path == NULL) {
 		return -EINVAL;
+	}
+	if (options->raw_path != NULL && options->log_path == NULL) {
+		return -EINVAL; /* сирі відліки пише той самий записувач, що й лог */
 	}
 
 	return 0;
@@ -291,9 +302,9 @@ static void print_usage(const char *program)
 	fprintf(
 	    stderr,
 	    "usage: %s [%s | %s file [%s factor] | %s dir [%s hz]] [%s dir] [%s port [%s baud]] "
-	    "[%s file]\n",
+	    "[%s file [%s file]]\n",
 	    program, STDIN_OPTION, REPLAY_OPTION, SPEED_OPTION, IIO_OPTION, IIO_RATE_OPTION,
-	    IIO_AUX_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION);
+	    IIO_AUX_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION, DUMP_RAW_OPTION);
 }
 
 static bool has_any_source(const struct options *options)

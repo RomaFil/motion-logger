@@ -5,6 +5,8 @@
 
 ## 01.11.2026
 
+- **Застосунок:** опція `--dump-raw <файл>` пише сирі відліки основного акселерометра в CSV (формат `accel_csv`),
+  щоб звірити події справжнього запису з `analyze_recording` (крок 5.3 на платі).
 - **Образ (не збирався, на платі не перевірявся; гілка `feature/wifi`):** Wi-Fi замість Ethernet. У `defconfig`:
   `linux-firmware` (`BRCM_BCM43XXX`), `wireless-regdb`, `wpa_supplicant` (nl80211, `wpa_cli`). Новий скрипт
   `S41wifi` читає мережі з `/boot/wifi.txt` (FAT-розділ картки, у git його немає), генерує конфіг у `/run` і

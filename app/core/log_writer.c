@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "accel_csv.h"
 #include "io_util.h"
 #include "motion_defaults.h"
 #include "sensor.h"
@@ -35,6 +36,9 @@
 
 #define LOG_FILE_MODE 0644
 
+/* Перший рядок файлу сирих відліків: коментар, accel_csv його пропускає. */
+#define RAW_HEADER "# t_ms,x_g,y_g,z_g\n"
+
 /* Приватні функції описано тут, а визначено внизу: публічні функції йдуть першими. */
 static bool is_valid_source(const char *source);
 static void *run_writer_thread(void *argument);
@@ -44,6 +48,8 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 static void write_aux_sample(struct log_writer *lw, const struct sample *item);
 static void write_gps_sample(struct log_writer *lw, const struct sample *item);
 static void write_line(struct log_writer *lw, const char *line, int length);
+static int open_raw_file(const char *path);
+static void write_raw_sample(struct log_writer *lw, const struct sample *item);
 static void sleep_idle(void);
 
 int log_writer_format_line(char *out, size_t size, const char *source, int64_t timestamp_ms,
@@ -169,6 +175,12 @@ int log_writer_format_gps(char *out, size_t size, const struct sample *sample)
 
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path)
 {
+	return log_writer_start_with(lw, rb, path, NULL);
+}
+
+int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const char *path,
+			  const struct log_writer_options *options)
+{
 	int error;
 
 	if (lw == NULL || rb == NULL || path == NULL) {
@@ -188,6 +200,16 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 		return -errno;
 	}
 
+	lw->raw_fd = -1;
+	if (options != NULL && options->raw_path != NULL) {
+		error = open_raw_file(options->raw_path);
+		if (error < 0) {
+			close(lw->fd);
+			return error;
+		}
+		lw->raw_fd = error;
+	}
+
 	lw->source_buffer = rb;
 	lw->aux_seen = false;
 	lw->last_aux_ms = 0;
@@ -197,6 +219,9 @@ int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *
 	error = pthread_create(&lw->thread, NULL, run_writer_thread, lw);
 	if (error != 0) {
 		close(lw->fd);
+		if (lw->raw_fd >= 0) {
+			close(lw->raw_fd);
+		}
 		return -error;
 	}
 
@@ -222,8 +247,29 @@ int log_writer_stop(struct log_writer *lw, struct log_writer_stats *stats)
 	if (close(lw->fd) < 0) {
 		result = -errno;
 	}
+	if (lw->raw_fd >= 0 && close(lw->raw_fd) < 0 && result == 0) {
+		result = -errno;
+	}
 
 	return result;
+}
+
+/* Створює файл сирих відліків заново й пише в нього рядок-коментар із назвами стовпців. */
+static int open_raw_file(const char *path)
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, LOG_FILE_MODE);
+
+	if (fd < 0) {
+		return -errno;
+	}
+	if (write_all(fd, RAW_HEADER, strlen(RAW_HEADER)) < 0) {
+		int error = -errno;
+
+		close(fd);
+		return error;
+	}
+
+	return fd;
 }
 
 /* Ім'я джерела потрапляє в JSON без екранування, тому дозволяємо лише безпечні символи. */
@@ -321,6 +367,7 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 	char line[LOG_WRITER_LINE_SIZE];
 	int length;
 
+	write_raw_sample(lw, item);
 	if (motion_report_add_sample(&lw->detector, &accel, &update) < 0) {
 		lw->stats.failed++; /* час спадає або число не скінченне: відлік відкинуто */
 		return;
@@ -384,6 +431,25 @@ static void write_line(struct log_writer *lw, const char *line, int length)
 	}
 
 	lw->stats.written++;
+}
+
+/* Сирий відлік основного акселерометра в файл сирих відліків (якщо його задано), формат accel_csv.
+ */
+static void write_raw_sample(struct log_writer *lw, const struct sample *item)
+{
+	char line[ACCEL_CSV_MAX_LINE];
+	int length;
+
+	if (lw->raw_fd < 0) {
+		return;
+	}
+
+	length = snprintf(line, sizeof(line), "%" PRId64 ",%.5f,%.5f,%.5f\n", item->time_ms,
+			  item->x_g, item->y_g, item->z_g);
+	if (length < 0 || (size_t)length >= sizeof(line) ||
+	    write_all(lw->raw_fd, line, (size_t)length) < 0) {
+		lw->stats.failed++;
+	}
 }
 
 static void sleep_idle(void)

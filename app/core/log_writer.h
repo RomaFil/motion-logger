@@ -25,7 +25,8 @@
  *
  * Чому для основного акселерометра не кожен відлік: 100 рядків на секунду це 6 КБ/с, години
  * логу, з якого людині треба вручну витягувати «коли я йшов». Подій і підсумку секунди досить;
- * сирі відліки при потребі лежать у CSV-записі (формат accel_csv).
+ * сирі відліки при потребі лежать у CSV-записі (формат accel_csv), який записувач пише
+ * паралельно, якщо задано log_writer_options.raw_path (опція --dump-raw).
  *
  * Рух визначає фільтр (motion_filter + motion_events), параметри беруться з
  * motion_defaults.h. Це ті самі модулі, що й в analyze_recording, тому лог і звіт збігаються.
@@ -66,6 +67,16 @@ struct log_writer_stats {
 	size_t failed;	/**< скільки записів не вдалося обробити чи записати */
 };
 
+/** @brief Додаткові можливості записувача; усе необов'язкове. */
+struct log_writer_options {
+	/**
+	 * Файл, куди йдуть СИРІ відліки основного акселерометра у форматі accel_csv
+	 * (t_ms,x_g,y_g,z_g, кожен відлік окремим рядком), або NULL. Той самий файл можна віддати
+	 * analyze_recording і побачити ті самі події, що й у логу.
+	 */
+	const char *raw_path;
+};
+
 /** @brief Стан записувача. Поля змінюй лише через функції log_writer_*. */
 struct log_writer {
 	struct ring_buffer *source_buffer;
@@ -73,6 +84,7 @@ struct log_writer {
 	int64_t last_aux_ms; /**< мітка часу останнього записаного рядка accel2 */
 	bool aux_seen;	     /**< чи писали вже рядок accel2 */
 	int fd;
+	int raw_fd; /**< файл сирих відліків, або -1 */
 	pthread_t thread;
 	atomic_bool stop_requested;
 	struct log_writer_stats stats;
@@ -150,6 +162,18 @@ int log_writer_format_gps(char *out, size_t size, const struct sample *sample);
  *         або створення потоку
  */
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path);
+
+/**
+ * @brief Те саме, що log_writer_start(), плюс необов'язкові можливості з options.
+ *
+ * Файл сирих відліків створюється заново (старий вміст зникає), бо два записи в один CSV мали б
+ * різний початок відліку часу. Першим рядком іде коментар із назвами стовпців.
+ *
+ * @param options додаткові можливості, або NULL (тоді це log_writer_start)
+ * @return як log_writer_start(); ще мінус код помилки відкриття файлу сирих відліків
+ */
+int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const char *path,
+			  const struct log_writer_options *options);
 
 /**
  * @brief Зупиняє записувач: дописує все, що ще лежить у буфері, закриває файл.

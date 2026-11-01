@@ -702,8 +702,85 @@ static void test_unknown_source_counts_as_failed(void)
 	unlink(path);
 }
 
+/*
+ * Файл сирих відліків: заголовок-коментар і по рядку на кожен відлік (час, три осі), у тому ж
+ * порядку; лог при цьому той самий, що й без файлу.
+ */
+static void test_raw_dump_has_every_accel_sample(void)
+{
+	static struct sample
+	    storage[(STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS) * ACCEL_RATE_HZ];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct log_writer_options options;
+	char line[LOG_WRITER_LINE_SIZE];
+	char path[TEMP_PATH_SIZE];
+	char raw_path[TEMP_PATH_SIZE];
+	int64_t moving_start_ms;
+	int64_t moving_end_ms;
+	size_t samples;
+	size_t lines = 0;
+	FILE *file;
+
+	make_temp_path(path);
+	make_temp_path(raw_path);
+	options.raw_path = raw_path;
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	samples = fill_still_moving_still(&rb, &moving_start_ms, &moving_end_ms);
+
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+	CHECK(stats.failed == 0);
+	CHECK(stats.events == 2);
+
+	file = fopen(raw_path, "r");
+	CHECK(file != NULL);
+	if (file != NULL) {
+		CHECK(fgets(line, sizeof(line), file) != NULL);
+		CHECK(strcmp(line, "# t_ms,x_g,y_g,z_g\n") == 0);
+		while (fgets(line, sizeof(line), file) != NULL) {
+			long long time_ms;
+			double x_g;
+			double y_g;
+			double z_g;
+
+			CHECK(sscanf(line, "%lld,%lf,%lf,%lf", &time_ms, &x_g, &y_g, &z_g) == 4);
+			CHECK(time_ms == (long long)lines * MS_PER_SAMPLE);
+			CHECK(fabs(z_g - 1.0) <= MOVING_AMPLITUDE_G + 1e-4);
+			lines++;
+		}
+		fclose(file);
+	}
+	CHECK(lines == samples);
+
+	check_start_then_stop(path, moving_start_ms, moving_end_ms);
+	ring_buffer_destroy(&rb);
+	unlink(path);
+	unlink(raw_path);
+}
+
+/* Файл сирих відліків, який не вдалося створити, це помилка запуску: лог не лишається відкритим. */
+static void test_raw_dump_reports_unwritable_path(void)
+{
+	static struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_options options = {.raw_path = "/nonexistent-dir/raw.csv"};
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == -ENOENT);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 int main(void)
 {
+	test_raw_dump_has_every_accel_sample();
+	test_raw_dump_reports_unwritable_path();
 	test_format_line_produces_exact_json();
 	test_format_line_rejects_bad_input();
 	test_format_event_produces_exact_json();
