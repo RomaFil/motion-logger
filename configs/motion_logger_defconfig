@@ -26,6 +26,15 @@ BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_CONFIG_FILE="$(BR2_EXTERNAL_MOTION_LOGGER_PATH)/board/motion_logger/config.txt"
 BR2_PACKAGE_RPI_FIRMWARE_CMDLINE_FILE="$(BR2_EXTERNAL_MOTION_LOGGER_PATH)/board/motion_logger/cmdline.txt"
 BR2_PACKAGE_DROPBEAR=y
+# Wi-Fi (wlan0 Pi 5, чип CYW43455): прошивка brcmfmac, wpa_supplicant через nl80211, wpa_cli для діагностики,
+# regulatory.db (без нього країна UA не застосовується, ядро підписане з CFG80211_REQUIRE_SIGNED_REGDB).
+# Мережі й паролі не в rootfs і не в git: файл wifi.txt на розділі boot (docs/wifi.md).
+BR2_PACKAGE_LINUX_FIRMWARE=y
+BR2_PACKAGE_LINUX_FIRMWARE_BRCM_BCM43XXX=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 # Діагностичні утиліти (i2cdetect, gpiodetect, gpioinfo); лише для навчального образу: викладач 22.10.2026 радив
 # прибрати їх із продуктового (крок G0 трекера)
 BR2_PACKAGE_I2C_TOOLS=y
