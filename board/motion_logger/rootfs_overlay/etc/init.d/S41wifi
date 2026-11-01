@@ -1,0 +1,131 @@
+#!/bin/sh
+# Wi-Fi на wlan0: wpa_supplicant + DHCP (BusyBox init викликає S* скрипти з аргументом start / stop).
+# Мережі й паролі НЕ в образі і НЕ в git: їх читаємо з /boot/wifi.txt (FAT-розділ microSD, його видно з
+# Windows). Змінити мережу = відредагувати цей файл на картці (або `vi /boot/wifi.txt` на платі) і
+# виконати `/etc/init.d/S41wifi restart`. Формат файлу: board/motion_logger/wifi.txt.example.
+# Пишемо на POSIX sh: на платі це BusyBox ash.
+NAME=wifi
+IFACE=wlan0
+BOOT_DEV=/dev/mmcblk0p1
+BOOT_DIR=/boot
+CONF_SRC=$BOOT_DIR/wifi.txt
+# Робочий конфіг wpa_supplicant лежить у tmpfs (/run): пароль не потрапляє у файлову систему образу.
+CONF=/run/wpa_supplicant.conf
+WPA_PID=/run/wpa_supplicant.pid
+DHCP_PID=/run/udhcpc.$IFACE.pid
+# Скільки секунд чекати появи wlan0 після завантаження модуля brcmfmac (прошивка вантажиться ~2 с).
+IFACE_TIMEOUT=20
+HOSTNAME_DHCP=motion-logger
+
+# Значення ключа з wifi.txt (перший збіг, без CR від Windows-редактора).
+key() {
+	sed -n "s/^$1=//p" "$CONF_SRC" | head -n 1 | tr -d '\r'
+}
+
+mount_boot() {
+	mountpoint -q "$BOOT_DIR" && return 0
+	mkdir -p "$BOOT_DIR"
+	# sync: файл правиться на платі вручну, не хочемо втратити зміну при вимкненні живлення.
+	mount -t vfat -o rw,noatime,sync "$BOOT_DEV" "$BOOT_DIR"
+}
+
+# wifi.txt -> /run/wpa_supplicant.conf. Мереж до чотирьох: SSID, SSID2, SSID3, SSID4 (+ PSK, PSK2, ...);
+# wpa_supplicant сам обирає ту, що в ефірі. Порожній PSK = відкрита мережа.
+make_conf() {
+	country=$(key COUNTRY)
+	umask 077
+	{
+		echo "ctrl_interface=/run/wpa_supplicant"
+		echo "country=${country:-UA}"
+		for n in "" 2 3 4; do
+			ssid=$(key "SSID$n")
+			[ -n "$ssid" ] || continue
+			psk=$(key "PSK$n")
+			echo "network={"
+			echo "	ssid=\"$ssid\""
+			echo "	scan_ssid=1"
+			if [ -n "$psk" ]; then
+				echo "	psk=\"$psk\""
+			else
+				echo "	key_mgmt=NONE"
+			fi
+			echo "}"
+		done
+	} >"$CONF"
+	grep -q '^network=' "$CONF"
+}
+
+is_running() {
+	[ -f "$WPA_PID" ] && kill -0 "$(cat "$WPA_PID")" 2>/dev/null
+}
+
+start() {
+	if is_running; then
+		echo "$NAME: already running (pid $(cat "$WPA_PID"))"
+		return 0
+	fi
+	# Далі скрізь return 0: відсутність Wi-Fi не повинна зупиняти завантаження (консоль і Ethernet лишаються).
+	if ! mount_boot; then
+		echo "$NAME: не вдалося змонтувати $BOOT_DEV на $BOOT_DIR" >&2
+		return 0
+	fi
+	if [ ! -r "$CONF_SRC" ]; then
+		echo "$NAME: нема $CONF_SRC, Wi-Fi не вмикаю (створіть файл за зразком wifi.txt.example)" >&2
+		return 0
+	fi
+	if ! make_conf; then
+		rm -f "$CONF"
+		echo "$NAME: у $CONF_SRC нема жодного рядка SSID=..., Wi-Fi не вмикаю" >&2
+		return 0
+	fi
+	waited=0
+	while [ ! -d "/sys/class/net/$IFACE" ] && [ "$waited" -lt "$IFACE_TIMEOUT" ]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if [ ! -d "/sys/class/net/$IFACE" ]; then
+		echo "$NAME: інтерфейс $IFACE не з'явився за ${IFACE_TIMEOUT} с (перевірте dmesg | grep brcmfmac)" >&2
+		return 0
+	fi
+	# -B у фон, -s: журнал у syslog (читати: cat /var/log/messages).
+	wpa_supplicant -B -s -i "$IFACE" -c "$CONF" -P "$WPA_PID" || {
+		echo "$NAME: wpa_supplicant не запустився" >&2
+		return 0
+	}
+	# -b: якщо адреси ще нема (точка доступу не підключила), лишається у фоні й повторює спроби.
+	udhcpc -i "$IFACE" -b -p "$DHCP_PID" -x "hostname:$HOSTNAME_DHCP" -t 3 -T 2 -A 5 -S
+	echo "$NAME: started ($IFACE)"
+}
+
+stop() {
+	for pidfile in "$DHCP_PID" "$WPA_PID"; do
+		[ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
+		rm -f "$pidfile"
+	done
+	rm -f "$CONF"
+	echo "$NAME: stopped"
+}
+
+status() {
+	if is_running; then
+		echo "$NAME is running (pid $(cat "$WPA_PID"))"
+		ip -4 addr show "$IFACE" 2>/dev/null | sed -n 's/^ *inet /  inet /p'
+		return 0
+	fi
+	echo "$NAME is not running"
+	return 3
+}
+
+case "$1" in
+start) start ;;
+stop) stop ;;
+restart)
+	stop
+	start
+	;;
+status) status ;;
+*)
+	echo "Usage: $0 {start|stop|restart|status}" >&2
+	exit 1
+	;;
+esac
