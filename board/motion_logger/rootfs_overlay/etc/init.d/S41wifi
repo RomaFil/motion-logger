@@ -20,7 +20,7 @@ HOSTNAME_DHCP=motion-logger
 # Діагностика без консолі: через DEBUG_DELAYS секунд після старту пишемо стан Wi-Fi у /boot/wifi-debug.log
 # (файл видно з Windows, коли картку вставлено в ПК). Вимкнути: DEBUG=0 у wifi.txt.
 DEBUG_LOG=$BOOT_DIR/wifi-debug.log
-DEBUG_DELAYS="25 90"
+DEBUG_DELAYS="25 90 200"
 
 # Значення ключа з wifi.txt (перший збіг, без CR від Windows-редактора).
 key() {
@@ -67,12 +67,13 @@ debug_snapshot() {
 	echo "--- wlan0 mac: $(cat /sys/class/net/$IFACE/address 2>/dev/null)"
 	echo "--- lsmod (net/wifi):"; lsmod | grep -E 'brcm|cfg80211|rfkill|mmc|sdhci'
 	echo "--- dmesg (wifi):"; dmesg | grep -iE 'brcm|wlan|mmc[0-9]|sdio|firmware|cfg80211|regulatory|wifi' | tail -n 40
-	echo "--- dmesg (tail):"; dmesg | tail -n 15
+	echo "--- dmesg (tail):"; dmesg | grep -v 'set_channel' | tail -n 15
 	echo "--- processes (all):"; ps
 	echo "--- binaries:"; ls -l /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli 2>&1; wpa_supplicant -v 2>&1 | head -n 2
 	echo "--- /run:"; ls -l /run /run/wpa_supplicant 2>&1
 	echo "--- wpa conf (psk hidden):"; sed 's/psk=.*/psk=<hidden>/' "$CONF" 2>&1
-	echo "--- wpa_supplicant.log (tail):"; tail -n 60 "$WPA_LOG" 2>&1
+	echo "--- wpa events (all):"; grep -E 'CTRL-EVENT|State: |handshake|EAPOL|Deauth|Disassoc|reason=|Authentication|status_code|SME:|Trying to|Connection to|disabled|Associated with' "$WPA_LOG" 2>&1 | grep -v 'chanspec' | tail -n 80
+	echo "--- wpa_supplicant.log (tail 25):"; tail -n 25 "$WPA_LOG" 2>&1
 	echo "--- ip addr:"; ip addr show "$IFACE" 2>&1
 	echo "--- wpa_cli status:"; wpa_cli -i "$IFACE" status 2>&1
 	echo "--- iw power_save / link:"; iw dev "$IFACE" get power_save 2>&1; iw dev "$IFACE" link 2>&1
