@@ -64,6 +64,15 @@ int motion_report_init(struct motion_report *report, size_t window_size, double 
 		       size_t confirm_samples);
 
 /**
+ * @brief Задає поріг виходу з руху нижчий за поріг входу (див. motion_filter_set_release).
+ *
+ * Викликай після motion_report_init() і до перших відліків.
+ *
+ * @return 0 при успіху; -EINVAL, якщо report NULL або поріг недопустимий
+ */
+int motion_report_set_release(struct motion_report *report, double release_g);
+
+/**
  * @brief Обробляє черговий відлік.
  *
  * @param report  звіт, ініціалізований через motion_report_init()

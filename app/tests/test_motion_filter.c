@@ -307,8 +307,57 @@ static void test_bad_samples_are_rejected_and_state_is_kept(void)
 	CHECK(nearly_equal(motion_filter_get_average(&filter), before));
 }
 
+/* Поріг виходу: від нуля до порога входу; усе інше, і NULL, це помилка. */
+static void test_set_release_rejects_bad_arguments(void)
+{
+	struct motion_filter filter;
+
+	setup_filter(&filter, 1, 0.25);
+	CHECK(motion_filter_set_release(NULL, 0.1) == -EINVAL);
+	CHECK(motion_filter_set_release(&filter, -0.1) == -EINVAL);
+	CHECK(motion_filter_set_release(&filter, NAN) == -EINVAL);
+	CHECK(motion_filter_set_release(&filter, 0.26) == -EINVAL);
+	CHECK(motion_filter_set_release(&filter, 0.25) == 0);
+	CHECK(motion_filter_set_release(&filter, 0.0) == 0);
+}
+
+/*
+ * Гістерезис (вікно 1, вхід 0,25 g, вихід 0,1 g): відхилення між порогами не вмикає рух, але й не
+ * вимикає його. Відлік «z = 1,0 + d» дає відхилення ≈ d, бо середнє зсувається на 1/300 за відлік.
+ */
+static void test_hysteresis_keeps_motion_between_the_thresholds(void)
+{
+	struct motion_filter filter;
+
+	setup_filter(&filter, 1, 0.25);
+	CHECK(motion_filter_set_release(&filter, 0.1) == 0);
+	CHECK(motion_filter_add_sample(&filter, 0.0, 0.0, 1.0) == 0);
+
+	/* 0,2 g: нижче порога входу, руху ще нема */
+	CHECK(motion_filter_add_sample(&filter, 0.0, 0.0, 1.2) == 0);
+	CHECK(!motion_filter_is_moving(&filter));
+
+	/* 0,3 g: вище порога входу, рух почався */
+	CHECK(motion_filter_add_sample(&filter, 0.0, 0.0, 1.3) == 0);
+	CHECK(motion_filter_is_moving(&filter));
+
+	/* ≈0,2 g: між порогами, рух триває (з одним порогом він би вже обірвався) */
+	CHECK(motion_filter_add_sample(&filter, 0.0, 0.0, 1.2) == 0);
+	CHECK(motion_filter_is_moving(&filter));
+
+	/* ≈0,05 g: нижче порога виходу, рух закінчився */
+	CHECK(motion_filter_add_sample(&filter, 0.0, 0.0, 1.05) == 0);
+	CHECK(!motion_filter_is_moving(&filter));
+
+	/* ≈0,2 g: між порогами, і рух знову не починається */
+	CHECK(motion_filter_add_sample(&filter, 0.0, 0.0, 1.2) == 0);
+	CHECK(!motion_filter_is_moving(&filter));
+}
+
 int main(void)
 {
+	test_set_release_rejects_bad_arguments();
+	test_hysteresis_keeps_motion_between_the_thresholds();
 	test_init_rejects_bad_arguments();
 	test_new_filter_reports_no_motion();
 	test_standing_flat_is_not_motion();

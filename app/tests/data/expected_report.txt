@@ -1,4 +1,4 @@
-# window=50 threshold_g=0.020 confirm=50
+# window=50 threshold_g=0.030 release_g=0.015 confirm=50
 second moving samples avg_dev_g
      0 no         100 0.0058
      1 no         100 0.0071
@@ -121,7 +121,7 @@ second moving samples avg_dev_g
    118 yes        100 0.1162
    119 yes        100 0.0655
 events:
-  59.570 s  MOVE START
+  59.620 s  MOVE START
 accel: 12000 samples, 0 rejected lines
 gps: 1564 lines: 120 RMC, 120 GGA, 1322 other, 0 bad checksum, 2 malformed
 gps: 158 fixes with position, 82 without

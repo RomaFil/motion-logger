@@ -194,6 +194,10 @@ int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const c
 	if (error < 0) {
 		return error;
 	}
+	error = motion_report_set_release(&lw->detector, MOTION_DEFAULT_RELEASE_G);
+	if (error < 0) {
+		return error;
+	}
 
 	lw->fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, LOG_FILE_MODE);
 	if (lw->fd < 0) {

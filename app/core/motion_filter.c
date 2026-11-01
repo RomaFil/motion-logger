@@ -22,6 +22,8 @@ int motion_filter_init(struct motion_filter *filter, size_t window_size, double 
 
 	filter->window_size = window_size;
 	filter->threshold_g = threshold_g;
+	filter->release_g = threshold_g;
+	filter->moving = false;
 	filter->next = 0;
 	filter->count = 0;
 	filter->baseline_g = 0.0;
@@ -30,8 +32,20 @@ int motion_filter_init(struct motion_filter *filter, size_t window_size, double 
 	return 0;
 }
 
+int motion_filter_set_release(struct motion_filter *filter, double release_g)
+{
+	if (filter == NULL || !(release_g >= 0.0) || release_g > filter->threshold_g) {
+		return -EINVAL;
+	}
+	filter->release_g = release_g;
+
+	return 0;
+}
+
 int motion_filter_add_sample(struct motion_filter *filter, double x, double y, double z)
 {
+	double average;
+
 	if (filter == NULL || !isfinite(x) || !isfinite(y) || !isfinite(z)) {
 		return -EINVAL;
 	}
@@ -40,6 +54,16 @@ int motion_filter_add_sample(struct motion_filter *filter, double x, double y, d
 	filter->next = (filter->next + 1) % filter->window_size;
 	if (filter->count < filter->window_size) {
 		filter->count++;
+	}
+
+	if (filter->count < filter->window_size) {
+		return 0; /* вікно ще неповне: руху нема */
+	}
+	average = motion_filter_get_average(filter);
+	if (!filter->moving && average > filter->threshold_g) {
+		filter->moving = true;
+	} else if (filter->moving && average <= filter->release_g) {
+		filter->moving = false;
 	}
 
 	return 0;
@@ -65,14 +89,7 @@ double motion_filter_get_average(const struct motion_filter *filter)
 	return sum / (double)filter->count;
 }
 
-bool motion_filter_is_moving(const struct motion_filter *filter)
-{
-	if (filter->count < filter->window_size) {
-		return false;
-	}
-
-	return motion_filter_get_average(filter) > filter->threshold_g;
-}
+bool motion_filter_is_moving(const struct motion_filter *filter) { return filter->moving; }
 
 /*
  * Наскільки довжина вектора прискорення відрізняється від свого повільного середнього, g.
