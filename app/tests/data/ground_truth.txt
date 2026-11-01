@@ -1,5 +1,3 @@
-# SYNTHETIC: що відбувалось насправді. Рядок: початок_с кінець_с стан (still|walking).
-# Для справжнього запису перепиши за тим, що робив: 0 60 still / 60 120 walking.
-0 20 still
-20 40 walking
-40 50 still
+# REAL: записано scripts/record_accel.py
+0 60 still
+60 120 walking
