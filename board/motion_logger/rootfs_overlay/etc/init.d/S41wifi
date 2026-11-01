@@ -41,7 +41,9 @@ make_conf() {
 	umask 077
 	{
 		echo "ctrl_interface=/run/wpa_supplicant"
-		echo "country=${country:-UA}"
+		# Країну задаємо лише явним COUNTRY= у wifi.txt. 01.11.2026 з country=UA регдомен змінювався знову й знову
+		# (REG_CHANGE кожні ~13 с, brcmfmac -52 на каналах 5 ГГц), і з'єднання рвалося.
+		[ -n "$country" ] && echo "country=$country"
 		for n in "" 2 3 4; do
 			ssid=$(key "SSID$n")
 			[ -n "$ssid" ] || continue
@@ -76,6 +78,9 @@ debug_snapshot() {
 	echo "--- wpa_supplicant.log (tail 25):"; tail -n 25 "$WPA_LOG" 2>&1
 	echo "--- ip addr:"; ip addr show "$IFACE" 2>&1
 	echo "--- wpa_cli status:"; wpa_cli -i "$IFACE" status 2>&1
+	echo "--- regdomain:"; iw reg get 2>&1 | head -n 6
+	echo "--- brcmfmac roamoff: $(cat /sys/module/brcmfmac/parameters/roamoff 2>&1)"
+	echo "--- power (dmesg):"; dmesg | grep -iE 'volt|throttl|brownout' | tail -n 5
 	echo "--- iw power_save / link:"; iw dev "$IFACE" get power_save 2>&1; iw dev "$IFACE" link 2>&1
 	echo "--- wpa_cli signal_poll:"; wpa_cli -i "$IFACE" signal_poll 2>&1
 	echo "--- wpa_cli scan_results:"; wpa_cli -i "$IFACE" scan_results 2>&1 | head -n 25

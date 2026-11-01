@@ -11,7 +11,8 @@
 | NVRAM Pi 5 | симлінк `lib/firmware/brcm/brcmfmac43455-sdio.raspberrypi,5-model-b.txt` на файл Pi 4 (той самий чип; у `linux-firmware` файлу саме для Pi 5 немає) |
 | Підключення до мережі | `wpa_supplicant` (nl80211), скрипт `etc/init.d/S41wifi` |
 | Адреса | `udhcpc` з BusyBox, ім'я хоста для роутера `motion-logger` |
-| Країна | `COUNTRY=UA` у `wifi.txt`, база `wireless-regdb` |
+| Країна | необов'язково: `COUNTRY=UA` у `wifi.txt` (за замовчуванням не задається), база `wireless-regdb` |
+| Енергозбереження | `iw dev wlan0 set power_save off` у `S41wifi`; `options brcmfmac roamoff=1` у `etc/modprobe.d/brcmfmac.conf` |
 
 ## Де лежать пароль і назва мережі
 
