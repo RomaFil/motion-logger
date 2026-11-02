@@ -8,7 +8,7 @@ MOTION_LOGGER_VERSION = 0.1
 MOTION_LOGGER_SITE = $(BR2_EXTERNAL_MOTION_LOGGER_PATH)/app
 MOTION_LOGGER_SITE_METHOD = local
 MOTION_LOGGER_LICENSE = Proprietary
-# Світлодіоди етапів руху (--stage-leds) керуються через libgpiod 1.x
+# Світлодіоди етапів руху й кнопка (--ui-gpio) керуються через libgpiod 1.x
 MOTION_LOGGER_DEPENDENCIES = libgpiod
 
 # BUILD винесено в каталог пакета: інакше host-збірка app/build потрапила б у rsync

@@ -3,12 +3,12 @@
 #   make CROSS_COMPILE=aarch64-linux-gnu-   збірка для Raspberry Pi 5
 #   make STATIC=1                           статична збірка (без залежності від libc на цілі)
 #   make DEBUG=1                            з відладочною інформацією
-#   make GPIOD=1                            зі світлодіодами етапів руху (libgpiod 1.x), --stage-leds
 #   make test                               зібрати й запустити тести (лише на цьому комп'ютері)
 #   make SANITIZE=address,undefined test    те саме з перевіркою пам'яті (ASan + UBSan; make clean до і після)
 #   make test-tsan                          те саме з ThreadSanitizer (перевірка гонок даних)
 #   make analyze                            зібрати інструмент аналізу запису (analyze_recording)
 #   make check-samples                      звірити звіт на tests/data з еталоном і з ground_truth.txt
+#   make GPIOD=1                            з кнопкою й світлодіодами етапів руху (libgpiod 1.x), --ui-gpio
 #   make check-sources                      фейковий IIO + NMEA-канал через motion_logger, у лозі рядки accel, accel2, gps
 #   make check-replay                       програти tests/data через motion_logger --replay, звірити події в лозі
 #   make update-sample-report               переписати еталон (після заміни даних на справжні)
@@ -51,12 +51,13 @@ TARGET := $(BUILD)/motion_logger
 SRCS := main.c core/ring_buffer.c core/sample_reader.c core/sensor_reader.c core/log_writer.c \
 	core/io_util.c core/motion_report.c core/motion_events.c core/motion_filter.c core/accel_csv.c \
 	drivers/csv_player.c drivers/iio_accel.c drivers/uart_port.c core/gps_reader.c core/nmea.c \
-	core/nmea_parser.c core/stage_indicator.c
+	core/nmea_parser.c core/recording_ui.c core/ui_controller.c
 
-# Світлодіоди етапів руху через libgpiod 1.x: make GPIOD=1. Потрібні libgpiod і її заголовки на цілі
-# (у Buildroot їх дає пакет libgpiod). Без GPIOD=1 драйвер не збирається, а --stage-leds видає зрозумілу помилку.
+# Кнопка й світлодіоди етапів руху через libgpiod 1.x (кроки 5.3 і 5.4): make GPIOD=1. Потрібні libgpiod і її
+# заголовки на цілі (у Buildroot їх дає пакет libgpiod). Без GPIOD=1 драйвер не збирається, а --ui-gpio видає
+# зрозумілу помилку.
 ifeq ($(GPIOD),1)
-  SRCS += drivers/gpiod_stage.c
+  SRCS += drivers/gpiod_ui.c
   override CFLAGS += -DHAVE_GPIOD
   GPIOD_LIBS := -lgpiod
 endif
@@ -77,7 +78,7 @@ TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/t
 	$(BUILD)/test_nmea $(BUILD)/test_nmea_parser $(BUILD)/test_motion_filter \
 	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report \
 	$(BUILD)/test_sensor_reader $(BUILD)/test_csv_player $(BUILD)/test_iio_accel \
-	$(BUILD)/test_gps_reader $(BUILD)/test_stage_indicator
+	$(BUILD)/test_gps_reader $(BUILD)/test_recording_ui $(BUILD)/test_ui_controller
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
 	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
@@ -90,7 +91,8 @@ TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader
 	$(BUILD)/tests/test_csv_player.o $(BUILD)/drivers/csv_player.o \
 	$(BUILD)/tests/test_iio_accel.o $(BUILD)/drivers/iio_accel.o \
 	$(BUILD)/tests/test_gps_reader.o $(BUILD)/core/gps_reader.o $(BUILD)/drivers/uart_port.o \
-	$(BUILD)/tests/test_stage_indicator.o $(BUILD)/core/stage_indicator.o \
+	$(BUILD)/tests/test_recording_ui.o $(BUILD)/core/recording_ui.o \
+	$(BUILD)/tests/test_ui_controller.o $(BUILD)/core/ui_controller.o \
 	$(ANALYZE_OBJS)
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
@@ -144,7 +146,11 @@ $(BUILD)/test_gps_reader: $(BUILD)/tests/test_gps_reader.o $(BUILD)/core/gps_rea
 		$(BUILD)/core/nmea.o $(BUILD)/drivers/uart_port.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-$(BUILD)/test_stage_indicator: $(BUILD)/tests/test_stage_indicator.o $(BUILD)/core/stage_indicator.o
+$(BUILD)/test_recording_ui: $(BUILD)/tests/test_recording_ui.o $(BUILD)/core/recording_ui.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_ui_controller: $(BUILD)/tests/test_ui_controller.o $(BUILD)/core/ui_controller.o \
+		$(BUILD)/core/recording_ui.o $(BUILD)/core/io_util.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_nmea: $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o
@@ -228,6 +234,16 @@ $(BUILD)/test_gps_reader_tsan: tests/test_gps_reader.c tests/check.h core/gps_re
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_gps_reader.c core/gps_reader.c core/ring_buffer.c \
 		core/io_util.c core/nmea_parser.c core/nmea.c drivers/uart_port.c
 
+$(BUILD)/test_recording_ui_tsan: tests/test_recording_ui.c tests/check.h core/recording_ui.c core/recording_ui.h \
+		interfaces/ui_io.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_recording_ui.c core/recording_ui.c
+
+$(BUILD)/test_ui_controller_tsan: tests/test_ui_controller.c tests/check.h core/ui_controller.c core/ui_controller.h \
+		core/recording_ui.c core/recording_ui.h core/io_util.c core/io_util.h interfaces/ui_io.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_ui_controller.c core/ui_controller.c core/recording_ui.c core/io_util.c
+
 $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_writer.c \
 		core/log_writer.h core/io_util.c core/io_util.h core/ring_buffer.c core/ring_buffer.h \
 		core/motion_report.c core/motion_report.h core/motion_events.c core/motion_events.h \
@@ -235,11 +251,6 @@ $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_wr
 	@mkdir -p $(@D)
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_log_writer.c core/log_writer.c core/io_util.c \
 		core/ring_buffer.c core/motion_report.c core/motion_events.c core/motion_filter.c -lm
-
-$(BUILD)/test_stage_indicator_tsan: tests/test_stage_indicator.c tests/check.h core/stage_indicator.c \
-		core/stage_indicator.h interfaces/stage_io.h core/motion_events.h
-	@mkdir -p $(@D)
-	$(CC) $(TSAN_FLAGS) -o $@ tests/test_stage_indicator.c core/stage_indicator.c
 
 $(BUILD)/test_nmea_tsan: tests/test_nmea.c tests/check.h core/nmea.c core/nmea.h
 	@mkdir -p $(@D)

@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -777,49 +778,104 @@ static void test_raw_dump_reports_unwritable_path(void)
 	unlink(path);
 }
 
-/* Скільки подій запам'ятовує перевірка гачка. */
-#define SEEN_EVENTS_MAX 8
+#define SETTLE_MS 50
+#define PAUSE_TEST_CAPACITY 600
 
-struct seen_events {
-	enum motion_event events[SEEN_EVENTS_MAX];
-	int count;
-};
-
-static void remember_event(void *context, enum motion_event event)
+/* Чекає, поки записувач забере все з буфера й обробить останній запис. */
+static void wait_until_written(struct ring_buffer *rb)
 {
-	struct seen_events *seen = context;
+	const struct timespec millisecond = {.tv_sec = 0, .tv_nsec = 1000000L};
+	const struct timespec settle = {.tv_sec = 0, .tv_nsec = SETTLE_MS * 1000000L};
 
-	if (seen->count < SEEN_EVENTS_MAX) {
-		seen->events[seen->count] = event;
+	while (!ring_buffer_is_empty(rb)) {
+		nanosleep(&millisecond, NULL);
 	}
-	seen->count++;
+	nanosleep(&settle, NULL);
 }
 
-/* Гачок on_event отримує кожну подію руху в тому порядку, у якому вона потрапила в лог. */
-static void test_event_hook_sees_start_then_stop(void)
+/* Поки запис на паузі, числа забираються з буфера, але в лог не потрапляють; після паузи йдуть. */
+static void test_paused_samples_are_dropped_and_counted(void)
 {
-	static struct sample
-	    storage[(STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS) * ACCEL_RATE_HZ];
+	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 	struct log_writer_stats stats;
-	struct seen_events seen = {.count = 0};
-	struct log_writer_options options = {.on_event = remember_event, .event_context = &seen};
-	int64_t moving_start_ms;
-	int64_t moving_end_ms;
+	char path[TEMP_PATH_SIZE];
+	int32_t i;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+
+	log_writer_set_paused(&lw, true);
+	for (i = 0; i < 3; i++) {
+		CHECK(push_value(&rb, i) == 0);
+	}
+	wait_until_written(&rb);
+
+	log_writer_set_paused(&lw, false);
+	for (i = 0; i < 2; i++) {
+		CHECK(push_value(&rb, i) == 0);
+	}
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.paused == 3);
+	CHECK(stats.written == 2);
+	CHECK(stats.failed == 0);
+	check_log_file(path, 2);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Кладе в буфер STILL_SECONDS спокою і MOVING_SECONDS руху, починаючи з мітки start_ms. */
+static void push_still_then_moving(struct ring_buffer *rb, int64_t start_ms)
+{
+	const int still_samples = STILL_SECONDS * ACCEL_RATE_HZ;
+	const int total = (STILL_SECONDS + MOVING_SECONDS) * ACCEL_RATE_HZ;
+	int i;
+
+	for (i = 0; i < total; i++) {
+		double z_g = 1.0;
+		struct sample item;
+
+		if (i >= still_samples) {
+			z_g += (i % 2 == 0) ? MOVING_AMPLITUDE_G : -MOVING_AMPLITUDE_G;
+		}
+		item = make_accel_item(start_ms + (int64_t)i * MS_PER_SAMPLE, 0.0, 0.0, z_g);
+		CHECK(ring_buffer_push(rb, &item) == 0);
+	}
+}
+
+/* Прапорець руху стає true після MOVE_START, а пауза з наступним зняттям скидає його. */
+static void test_moving_flag_follows_events_and_resets_after_pause(void)
+{
+	static struct sample storage[PAUSE_TEST_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct sample item;
 	char path[TEMP_PATH_SIZE];
 
 	make_temp_path(path);
-	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
-	fill_still_moving_still(&rb, &moving_start_ms, &moving_end_ms);
+	CHECK(ring_buffer_init(&rb, storage, PAUSE_TEST_CAPACITY) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(!log_writer_is_moving(&lw));
+	CHECK(!log_writer_is_moving(NULL));
 
-	CHECK(log_writer_start_with(&lw, &rb, path, &options) == 0);
-	CHECK(log_writer_stop(&lw, &stats) == 0);
+	push_still_then_moving(&rb, 0);
+	wait_until_written(&rb);
+	CHECK(log_writer_is_moving(&lw));
 
-	CHECK(stats.events == 2);
-	CHECK(seen.count == 2);
-	CHECK(seen.events[0] == MOTION_EVENT_START);
-	CHECK(seen.events[1] == MOTION_EVENT_STOP);
+	/* Пауза й зняття паузи: фільтр починає заново, перший відлік у спокої прапорець скидає. */
+	log_writer_set_paused(&lw, true);
+	log_writer_set_paused(&lw, false);
+	CHECK(!log_writer_is_moving(&lw)); /* скинуто одразу, до першого відліку після паузи */
+	item = make_accel_item(1000000, 0.0, 0.0, 1.0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+	wait_until_written(&rb);
+	CHECK(!log_writer_is_moving(&lw));
+
+	CHECK(log_writer_stop(&lw, NULL) == 0);
 
 	ring_buffer_destroy(&rb);
 	unlink(path);
@@ -827,7 +883,6 @@ static void test_event_hook_sees_start_then_stop(void)
 
 int main(void)
 {
-	test_event_hook_sees_start_then_stop();
 	test_raw_dump_has_every_accel_sample();
 	test_raw_dump_reports_unwritable_path();
 	test_format_line_produces_exact_json();
@@ -853,6 +908,8 @@ int main(void)
 	test_aux_samples_are_written_once_per_second();
 	test_gps_samples_are_written_in_order();
 	test_unknown_source_counts_as_failed();
+	test_paused_samples_are_dropped_and_counted();
+	test_moving_flag_follows_events_and_resets_after_pause();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);

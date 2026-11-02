@@ -9,7 +9,11 @@
 # 50 Гц, а --iio-rate 100 лише опитує його 100 разів на секунду, тож без цього кожен другий відлік
 # був би дублікатом.
 #
-# --stage-leds gpiochip0: три світлодіоди етапів руху (до руху, рух, після зупинки).
+# --ui-gpio gpiochip0: три світлодіоди етапів руху: 1 (GPIO22) до першого руху, 2 (GPIO6, середній)
+# під час руху, 3 (GPIO27) після зупинки. Кнопка (GPIO17) ставить запис на паузу й знімає з неї; на паузі
+# горять всі три, а після паузи запис і фільтр руху починаються заново. Кнопку на залізі ще не перевірено,
+# тому зараз стоїть --ui-no-button (лише світлодіоди). Щоб увімкнути кнопку, прибери --ui-no-button; якщо
+# кнопка дає 0 при натисканні, додай --ui-button-active-low. Вимагає --log.
 #
 # Лог лежить у /var/log, а це tmpfs (пам'ять): SD-картка не зношується, але після вимкнення живлення
 # лог зникає. Для довгої роботи виносьте його на окремий розділ.
@@ -18,4 +22,4 @@
 #   MOTION_LOGGER_OPTS="--replay /root/accel_sample.csv --speed 1 --log /var/log/motion.jsonl"
 # Без жодного джерела програма нічого не читає й одразу завершується.
 MOTION_LOGGER_IIO_RATES="mpu6050:100"
-MOTION_LOGGER_OPTS="--iio @mpu6050 --iio-rate 100 --iio-aux @adxl345 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl --stage-leds gpiochip0"
+MOTION_LOGGER_OPTS="--iio @mpu6050 --iio-rate 100 --iio-aux @adxl345 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl --ui-gpio gpiochip0 --ui-no-button"

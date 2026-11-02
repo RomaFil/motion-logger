@@ -48,6 +48,7 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 static void write_aux_sample(struct log_writer *lw, const struct sample *item);
 static void write_gps_sample(struct log_writer *lw, const struct sample *item);
 static void write_line(struct log_writer *lw, const char *line, int length);
+static int init_detector(struct log_writer *lw);
 static int open_raw_file(const char *path);
 static void write_raw_sample(struct log_writer *lw, const struct sample *item);
 static void sleep_idle(void);
@@ -187,14 +188,7 @@ int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const c
 		return -EINVAL;
 	}
 
-	/* Параметри допустимі за побудовою (див. motion_defaults.h), помилка тут це помилка в них.
-	 */
-	error = motion_report_init(&lw->detector, MOTION_DEFAULT_WINDOW, MOTION_DEFAULT_THRESHOLD_G,
-				   MOTION_DEFAULT_CONFIRM);
-	if (error < 0) {
-		return error;
-	}
-	error = motion_report_set_release(&lw->detector, MOTION_DEFAULT_RELEASE_G);
+	error = init_detector(lw);
 	if (error < 0) {
 		return error;
 	}
@@ -205,8 +199,6 @@ int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const c
 	}
 
 	lw->raw_fd = -1;
-	lw->on_event = options != NULL ? options->on_event : NULL;
-	lw->event_context = options != NULL ? options->event_context : NULL;
 	if (options != NULL && options->raw_path != NULL) {
 		error = open_raw_file(options->raw_path);
 		if (error < 0) {
@@ -221,6 +213,9 @@ int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const c
 	lw->last_aux_ms = 0;
 	memset(&lw->stats, 0, sizeof(lw->stats));
 	atomic_init(&lw->stop_requested, false);
+	atomic_init(&lw->paused, false);
+	atomic_init(&lw->needs_reset, false);
+	atomic_init(&lw->moving, false);
 
 	error = pthread_create(&lw->thread, NULL, run_writer_thread, lw);
 	if (error != 0) {
@@ -232,6 +227,25 @@ int log_writer_start_with(struct log_writer *lw, struct ring_buffer *rb, const c
 	}
 
 	return 0;
+}
+
+void log_writer_set_paused(struct log_writer *lw, bool paused)
+{
+	if (lw == NULL) {
+		return;
+	}
+	if (!paused) {
+		/* Спершу скидання, потім зняття паузи. Ознаку руху скидаємо одразу: поки записувач
+		 * дійде до першого відліку, світлодіоди не повинні показувати рух до паузи. */
+		atomic_store(&lw->moving, false);
+		atomic_store(&lw->needs_reset, true);
+	}
+	atomic_store(&lw->paused, paused);
+}
+
+bool log_writer_is_moving(const struct log_writer *lw)
+{
+	return lw != NULL && atomic_load(&lw->moving);
 }
 
 int log_writer_stop(struct log_writer *lw, struct log_writer_stats *stats)
@@ -258,6 +272,22 @@ int log_writer_stop(struct log_writer *lw, struct log_writer_stats *stats)
 	}
 
 	return result;
+}
+
+/*
+ * Готує фільтр руху з параметрами за замовчуванням (див. motion_defaults.h): при старті і після
+ * паузи. Параметри допустимі за побудовою, тож помилка тут це помилка в них.
+ */
+static int init_detector(struct log_writer *lw)
+{
+	int error = motion_report_init(&lw->detector, MOTION_DEFAULT_WINDOW,
+				       MOTION_DEFAULT_THRESHOLD_G, MOTION_DEFAULT_CONFIRM);
+
+	if (error < 0) {
+		return error;
+	}
+
+	return motion_report_set_release(&lw->detector, MOTION_DEFAULT_RELEASE_G);
 }
 
 /* Створює файл сирих відліків заново й пише в нього рядок-коментар із назвами стовпців. */
@@ -334,6 +364,15 @@ static void *run_writer_thread(void *argument)
  */
 static void handle_sample(struct log_writer *lw, const struct sample *item)
 {
+	if (atomic_load(&lw->paused)) {
+		lw->stats.paused++;
+		return;
+	}
+	if (atomic_exchange(&lw->needs_reset, false)) {
+		(void)init_detector(lw);
+		atomic_store(&lw->moving, false);
+	}
+
 	switch (item->source) {
 	case SAMPLE_SOURCE_SIM:
 		write_sim_sample(lw, item);
@@ -389,13 +428,12 @@ static void write_accel_sample(struct log_writer *lw, const struct sample *item)
 		return;
 	}
 
+	atomic_store(&lw->moving, update.event == MOTION_EVENT_START);
+
 	length = log_writer_format_event(line, sizeof(line), item->time_ms, update.event);
 	write_line(lw, line, length);
 	if (length >= 0) {
 		lw->stats.events++;
-	}
-	if (lw->on_event != NULL) {
-		lw->on_event(lw->event_context, update.event);
 	}
 }
 
