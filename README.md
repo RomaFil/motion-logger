@@ -44,9 +44,15 @@
     make O=../build-pi5 BR2_EXTERNAL=/шлях/до/цього/репозиторію motion_logger_defconfig
     cd ../build-pi5 && make
 
-Образ: `build-pi5/images/sdcard.img`. Запис на картку: `dd if=sdcard.img of=/dev/sdX bs=4M conv=fsync`
-(перевірте `X`: помилка зітре чужий диск). Повну збірку з нуля чекайте близько 1,5 години; після зміни лише
-застосунку досить `make motion_logger-rebuild && make` (див. `CHANGELOG.md`).
+Те саме обгорткою `scripts/build.sh config|build|app|info` (змінні `BUILDROOT_DIR`, `BUILD_DIR`, `JOBS`,
+`LOW_PRIORITY=1` для збірки під `nice 19`):
+
+    BUILDROOT_DIR=../buildroot BUILD_DIR=../build-pi5 scripts/build.sh build
+
+Образ: `build-pi5/images/sdcard.img`. Запис на картку, Wi-Fi, перше ввімкнення, SSH і консоль: `docs/flash.md`.
+Повну збірку з нуля чекайте близько 1,5 години (перша на VPS 13.10.2026 тривала ≈ 96 хв). Після зміни лише
+застосунку: `scripts/build.sh app`; вона скидає збірку пакета (`motion_logger-dirclean`), бо пакет з локальними
+сирцями (`SITE_METHOD = local`) сам змін у `app/` не помічає (див. `CHANGELOG.md`).
 
 ## Схема підключення (плата Motion Logger на Raspberry Pi 5)
 
@@ -66,7 +72,7 @@
 
 - Консоль: USB-UART 3,3 В на `DBG1` (115200 8N1; `picocom -b 115200 /dev/ttyUSB0`), TX адаптера на RX плати і навпаки.
   Повідомлення ядра йдуть на роз'єм JST (`ttyAMA10`), на `DBG1` лише getty та вивід `S99motion_logger`.
-- Мережа: DHCP на `eth0`, SSH-сервер dropbear (користувач `root`, навчальний пароль задано в `configs/motion_logger_defconfig`;
+- Мережа: Wi-Fi (`wlan0`, мережі з `/boot/wifi.txt`, див. `docs/wifi.md`) і DHCP на `eth0`, SSH-сервер dropbear (користувач `root`, навчальний пароль задано в `configs/motion_logger_defconfig`;
   у продуктовому образі його прибрати).
 - Автозапуск: `/etc/init.d/S99motion_logger {start|stop|restart|status}`, параметри в `/etc/default/motion_logger`.
 - Перевірка заліза в образі (потрібні `i2c_arm` і `spi` у `config.txt` та модулі з `/etc/modules-load.d/`):
@@ -118,7 +124,7 @@
     {"t_ms":21000,"src":"gps","fix":true,"lat":50.450100,"lon":30.523400,"speed_knots":0.30,"sats":8}
     {"t_ms":3000,"src":"gps","fix":false,"sats":0}
 
-Поки модуль не спіймав супутників, координат у рядку немає зовсім (нульова широта була б вигаданою точкою на екваторі); `sats` це `null`, якщо рядка GGA ще не було. Без плати це перевіряють `tests/test_iio_accel.c` і `tests/test_gps_reader.c` (фальшивий каталог IIO та канал замість порту) та `make check-sources`, що запускає `motion_logger` з трьома джерелами одразу. **На справжньому залізі драйвер ще не перевірявся.**
+Поки модуль не спіймав супутників, координат у рядку немає зовсім (нульова широта була б вигаданою точкою на екваторі); `sats` це `null`, якщо рядка GGA ще не було. Без плати це перевіряють `tests/test_iio_accel.c` і `tests/test_gps_reader.c` (фальшивий каталог IIO та канал замість порту) та `make check-sources`, що запускає `motion_logger` з трьома джерелами одразу. На справжній платі це працює з 01.11.2026 (`docs/test-protocol-2026-11-01.md`).
 
 ## Кнопка й світлодіоди етапів руху (крок 5.4 і етапи 5.3)
 
@@ -148,4 +154,9 @@
 
 ## Статус
 
-Каркас (крок 2.1) і власний образ, що завантажується на Pi 5 (консоль на GPIO14, getty, dropbear). Готові: кільцевий буфер з замком (крок 2.2–2.3), читач на epoll з імітатором (крок 2.4), запис у лог (крок 2.5), одна команда `make test` і прапорці Makefile (крок 2.6), розбір NMEA, фільтр руху, події руху й аналіз запису (кроки 3.2–3.5 на синтетичних даних), поділ на `core/` / `interfaces/` / `drivers/` з програвачем CSV і події `MOVE_START`/`MOVE_STOP` у лозі (кроки 5.1 і 5.3 на синтетичних даних), читання IIO-акселерометрів і GPS з тестами на фальшивих джерелах (крок 5.2 без плати). Далі: перевірка на платі, коли буде корпус, і справжній запис для підбору порога.
+Перевірено на платі (Raspberry Pi 5, власний образ Buildroot 2026.08, лише Wi-Fi): автозапуск і лог з трьох
+джерел (кроки 5.2, 5.5, 5.6, тег `m6`), події руху з гістерезисом на записі «стою, іду, стою» (крок 5.3), кнопка
+паузи й світлодіоди етапів (крок 5.4, гілка `feature/wifi-ui`), U-Boot між прошивкою й ядром (крок 4.7, гілка
+`feature/uboot-wifi`; банер U-Boot на консолі ще не бачили, чекаємо кабель JST-SH). Документація в `docs/`:
+`design-doc.md`, `dts-overlay.md`, `uboot.md`, `wifi.md`, `flash.md`, `test-protocol-2026-11-01.md`, `questions.md`.
+Не злито в `main`: `feature/wifi-ui`, `feature/uboot-wifi`. Збір телеметрії (крок 5.7, `feature/telemetry`) на платі не перевірявся.
