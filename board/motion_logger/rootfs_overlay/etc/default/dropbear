@@ -1,0 +1,16 @@
+# Читає /etc/init.d/S50dropbear (Buildroot) перед стартом SSH-сервера.
+#
+# Ключі SSH без перезбирання образу: покладіть публічний ключ (рядок з ~/.ssh/id_ed25519.pub
+# на комп'ютері) у файл authorized_keys на розділі boot (FAT, правиться через кард-рідер). Тоді
+# ключ копіюється в /root/.ssh/authorized_keys, а вхід за паролем вимикається (-s): навчальний
+# пароль з defconfig у репозиторії, і з Wi-Fi він видний усій мережі.
+# Без файлу все як раніше: вхід за паролем. Перевірте ключ ДО того, як покладете файл: з
+# неправильним ключем по SSH не зайти, лишиться консоль на DBG1.
+if [ -s /boot/authorized_keys ]; then
+	mkdir -p /root/.ssh
+	chmod 700 /root/.ssh
+	if cp /boot/authorized_keys /root/.ssh/authorized_keys; then
+		chmod 600 /root/.ssh/authorized_keys
+		DROPBEAR_ARGS="-s"
+	fi
+fi

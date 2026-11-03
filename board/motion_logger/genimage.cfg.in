@@ -8,6 +8,16 @@ image boot.vfat {
 	size = 32M
 }
 
+# Розділ для логу (/data, монтує S12mounts): порожня ext4 з міткою data. Розмір можна змінити тут
+# або потім розтягнути на всю картку (README, «Розділ /data»).
+image data.ext4 {
+	ext4 {
+		label = "data"
+		use-mke2fs = true
+	}
+	size = 1G
+}
+
 image sdcard.img {
 	hdimage {
 	}
@@ -21,5 +31,10 @@ image sdcard.img {
 	partition rootfs {
 		partition-type = 0x83
 		image = "rootfs.ext4"
+	}
+
+	partition data {
+		partition-type = 0x83
+		image = "data.ext4"
 	}
 }

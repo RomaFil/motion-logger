@@ -5,6 +5,24 @@
 
 ## 03.11.2026
 
+- **Образ (не збирався, на платі не перевірявся): надійність і доступ.**
+  - Картка має третій розділ `data` (ext4, 1 ГБ, `genimage.cfg.in`); `S12mounts` монтує його в `/data`, а boot у
+    `/boot` лише для читання. **Розмітка змінилась: картку треба записати заново.**
+  - `S99motion_logger` запускає програму під наглядачем: після аварії перезапуск через 2…60 с, `status` показує обидва
+    PID; сирота після `kill -9` наглядача прибирається на наступному `start`.
+  - Watchdog: `BR2_PACKAGE_BUSYBOX_WATCHDOG` (`S15watchdog`, `/dev/watchdog` BCM2712).
+  - NTP: `busybox.fragment` вмикає `ntpd`, служба `S49ntp` (`/etc/default/ntp`).
+  - SSH-ключі: `authorized_keys` на розділі boot копіюється в `/root/.ssh` і вимикає вхід за паролем
+    (`/etc/default/dropbear`).
+  - `/etc/default/motion_logger`: готовий рядок для всіх датчиків, LED і логу на `/data` з ротацією.
+  - Тести: `check_init_script.sh` (наглядач), новий `check_overlay.sh`.
+  Після збірки перевірити: `mount | grep -E '/boot|/data'`, `S99motion_logger status`, `kill -9` програми й
+  повторний `status` (перезапуск), `ls /dev/watchdog`, `date` після підключення мережі.
+- **Застосунок:** збій шини датчика пропускає відлік (`read errors` у підсумку), зупинка лише після 500 збоїв підряд;
+  потік GPS не завершується від `read() == 0` на послідовному порту; `fdatasync` раз на 5 с; лог `0600`;
+  ротація `--log-max-mb` / `--log-keep`; рядок `"src":"log","event":"open"` з `boot_id`; поле `utc` у рядках `gps`;
+  `--iio mpu6050` (за іменем); `--gpio /dev/gpiochip0`: світлодіоди стану й кнопки (`"src":"button"`).
+  Формат старих рядків не змінився, лише в `gps` може з'явитися поле `utc` у кінці.
 - **Образ (не збирався, на платі не перевірявся): Wi-Fi.** У `defconfig` прошивка CYW43455
   (`brcmfmac-sdio-firmware-rpi-wifi`), `wireless-regdb`, `wpa_supplicant` з `wpa_cli` і `wpa_passphrase`, ім'я хоста
   `motion-logger`. `post-image.sh` кладе шаблон `board/motion_logger/wpa_supplicant.conf` на розділ boot. Нова служба

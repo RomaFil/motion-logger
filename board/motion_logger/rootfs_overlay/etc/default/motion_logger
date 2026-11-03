@@ -4,9 +4,10 @@
 #
 #   MOTION_LOGGER_OPTS="--replay /root/accel_sample.csv --speed 1 --log /var/log/motion.jsonl"
 #
-# Справжні датчики (номери iio:deviceN звірте з /sys/bus/iio/devices/iio:device*/name):
-#   MOTION_LOGGER_OPTS="--iio /sys/bus/iio/devices/iio:device0 --iio-aux /sys/bus/iio/devices/iio:device1 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl"
+# Справжні датчики: пристрої IIO за іменем драйвера (номер iio:deviceN не потрібен), GPS, світлодіоди
+# й кнопки плати, лог на розділі /data з ротацією (10 файлів по 50 МБ):
+#   MOTION_LOGGER_OPTS="--iio mpu6050 --iio-aux adxl345 --gps /dev/ttyAMA2 --gpio /dev/gpiochip0 --log /data/motion.jsonl --log-max-mb 50 --log-keep 10"
 #
-# Лог на кореневій файловій системі зношує SD-картку; для довгої роботи виносьте його на
-# окремий розділ або tmpfs.
+# Лог пишіть на /data (окремий розділ картки, див. README): корінь має лише 120 МБ.
+# Після зміни: /etc/init.d/S99motion_logger restart
 MOTION_LOGGER_OPTS=""

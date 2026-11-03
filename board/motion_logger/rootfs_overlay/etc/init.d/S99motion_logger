@@ -3,15 +3,27 @@
 # Пишемо на POSIX sh: на платі це BusyBox ash, без bash-конструкцій.
 # Контракт скрипта (презентація «Init», слайди 26 і 30): start і stop ідемпотентні, код виходу
 # 0 = успіх, status повертає 3, якщо служба не працює.
+#
+# Програму запускає «наглядач» (функція supervise нижче, окремий процес): якщо motion_logger
+# завершився з помилкою (датчик зник, порт не відкрився, аварія), наглядач запускає його знову
+# через RESTART_DELAY секунд, щоразу вдвічі довше, до RESTART_DELAY_MAX. Успішне завершення
+# (код 0: скінченне джерело --replay, порожні параметри) не перезапускається.
+# PIDFILE містить PID наглядача, CHILD_PIDFILE PID самої програми.
 NAME=motion_logger
 DAEMON=/usr/bin/$NAME
 PIDFILE=/var/run/$NAME.pid
+CHILD_PIDFILE=/var/run/$NAME.child.pid
 LOGFILE=/var/log/$NAME.log
 # Налагоджувальний порт DBG1 (GPIO14/15). Консоль ядра йде на ttyAMA10 (JST-рознім), а ttyAMA0
 # вільний, тож пишемо туди, щоб бачити вивід без JST-кабеля.
 DEBUG_TTY=/dev/ttyAMA0
 # Скільки секунд чекати завершення після SIGTERM, перш ніж вбити процес через SIGKILL.
 STOP_TIMEOUT=5
+# Пауза перед перезапуском після аварії: від RESTART_DELAY, подвоюється до RESTART_DELAY_MAX;
+# якщо програма перед аварією пропрацювала RESTART_RESET секунд, пауза знову найкоротша.
+RESTART_DELAY=2
+RESTART_DELAY_MAX=60
+RESTART_RESET=60
 
 # Параметри запуску (джерело відліків, лог) лежать окремо, щоб не правити скрипт:
 # /etc/default/motion_logger, змінна MOTION_LOGGER_OPTS.
@@ -20,37 +32,77 @@ MOTION_LOGGER_OPTS=""
 
 # Службова функція: 0, якщо процес із PID-файлу живий.
 is_running() {
-	[ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+	[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+# Наглядач: працює у власному процесі (запускається у фоні), перезапускає програму після аварії.
+# SIGTERM передається програмі; поки вона дописує лог, наглядач чекає.
+supervise() {
+	child=
+	pause_pid=
+	stopping=0
+	trap 'stopping=1; [ -n "$child" ] && kill "$child" 2>/dev/null; [ -n "$pause_pid" ] && kill "$pause_pid" 2>/dev/null' TERM INT
+	delay=$RESTART_DELAY
+	while :; do
+		started=$(date +%s)
+		# shellcheck disable=SC2086  # параметри з файлу налаштувань мають розбиватись на слова
+		"$DAEMON" $MOTION_LOGGER_OPTS &
+		child=$!
+		echo "$child" >"$CHILD_PIDFILE"
+		# wait повертається й тоді, коли прийшов сигнал: чекаємо, поки програма справді вийде.
+		while :; do
+			wait "$child"
+			code=$?
+			kill -0 "$child" 2>/dev/null || break
+		done
+		child=
+		rm -f "$CHILD_PIDFILE"
+		[ "$stopping" -eq 1 ] && break
+		[ "$code" -eq 0 ] && break
+
+		[ $(($(date +%s) - started)) -ge "$RESTART_RESET" ] && delay=$RESTART_DELAY
+		echo "$NAME: exited with code $code, restarting in ${delay}s"
+		sleep "$delay" &
+		pause_pid=$!
+		wait "$pause_pid"
+		pause_pid=
+		[ "$stopping" -eq 1 ] && break
+		delay=$((delay * 2))
+		[ "$delay" -gt "$RESTART_DELAY_MAX" ] && delay=$RESTART_DELAY_MAX
+	done
 }
 
 start() {
-	if is_running; then
+	if is_running "$PIDFILE"; then
 		echo "$NAME: already running (pid $(cat "$PIDFILE"))"
 		return 0
 	fi
 	rm -f "$PIDFILE" # застарілий PID-файл від аварійного завершення
+	# Наглядача вбили (kill -9), а програма лишилась сиротою: не запускаємо другу поруч.
+	if is_running "$CHILD_PIDFILE"; then
+		kill -9 "$(cat "$CHILD_PIDFILE")" 2>/dev/null
+	fi
+	rm -f "$CHILD_PIDFILE"
 
 	# Вивід: на DBG1, якщо порт доступний на запис, інакше у файл (слайд 39: логи кудись пишуться).
 	if [ -w "$DEBUG_TTY" ]; then
-		# shellcheck disable=SC2086  # параметри з файлу налаштувань мають розбиватись на слова
-		"$DAEMON" $MOTION_LOGGER_OPTS >"$DEBUG_TTY" 2>&1 &
+		supervise >"$DEBUG_TTY" 2>&1 &
 	else
-		# shellcheck disable=SC2086
-		"$DAEMON" $MOTION_LOGGER_OPTS >>"$LOGFILE" 2>&1 &
+		supervise >>"$LOGFILE" 2>&1 &
 	fi
 	echo $! >"$PIDFILE"
 	echo "$NAME: started"
 }
 
 stop() {
-	if ! is_running; then
+	if ! is_running "$PIDFILE"; then
 		rm -f "$PIDFILE"
 		echo "$NAME: not running"
 		return 0
 	fi
 
 	pid=$(cat "$PIDFILE")
-	kill "$pid" 2>/dev/null # спершу SIGTERM: програма дозаписує буфер у лог і виходить сама
+	kill "$pid" 2>/dev/null # SIGTERM: наглядач передає його програмі, вона дописує буфер у лог
 	waited=0
 	while [ "$waited" -lt "$STOP_TIMEOUT" ] && kill -0 "$pid" 2>/dev/null; do
 		sleep 1
@@ -58,15 +110,22 @@ stop() {
 	done
 	if kill -0 "$pid" 2>/dev/null; then
 		echo "$NAME: pid $pid ignored SIGTERM, killing" >&2
+		if [ -f "$CHILD_PIDFILE" ]; then
+			kill -9 "$(cat "$CHILD_PIDFILE")" 2>/dev/null
+		fi
 		kill -9 "$pid" 2>/dev/null
 	fi
-	rm -f "$PIDFILE"
+	rm -f "$PIDFILE" "$CHILD_PIDFILE"
 	echo "$NAME: stopped"
 }
 
 status() {
-	if is_running; then
-		echo "$NAME is running (pid $(cat "$PIDFILE"))"
+	if is_running "$PIDFILE"; then
+		if is_running "$CHILD_PIDFILE"; then
+			echo "$NAME is running (pid $(cat "$CHILD_PIDFILE"), supervisor $(cat "$PIDFILE"))"
+		else
+			echo "$NAME is restarting (supervisor $(cat "$PIDFILE"))"
+		fi
 		return 0
 	fi
 	echo "$NAME is not running"

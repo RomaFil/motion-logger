@@ -1,0 +1,3 @@
+# Доповнення до конфігурації BusyBox (BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES).
+# ntpd: синхронізація годинника по мережі, служба /etc/init.d/S49ntp.
+CONFIG_NTPD=y

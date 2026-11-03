@@ -1,0 +1,57 @@
+#!/bin/sh
+# Розділи картки, яких нема в /etc/fstab Buildroot:
+#   /boot  перший розділ (FAT): config.txt, wpa_supplicant.conf, authorized_keys. Лише для читання;
+#          команда wifi на мить перемонтовує його на запис.
+#   /data  третій розділ (ext4, мітка data): лог motion_logger. Окремо від кореня, щоб лог, що
+#          росте, не заповнив систему, а оновлення образу не стирало записи (якщо розділ лишити).
+# Якщо третього розділу нема (стара картка), /data просто каталог на корені, і про це пишемо.
+# Лише POSIX sh (BusyBox ash). Стоїть рано: до мережі (S40), Wi-Fi (S41), SSH (S50) і логера (S99).
+BOOT_DEV=/dev/mmcblk0p1
+BOOT_DIR=/boot
+DATA_DEV=/dev/mmcblk0p3
+DATA_DIR=/data
+
+[ -r /etc/default/mounts ] && . /etc/default/mounts
+
+is_mounted() {
+	grep -q " $1 " /proc/mounts
+}
+
+start() {
+	mkdir -p "$BOOT_DIR" "$DATA_DIR"
+	if ! is_mounted "$BOOT_DIR"; then
+		mount -t vfat -o ro,nodev,nosuid,noexec,fmask=0177,dmask=0077 "$BOOT_DEV" "$BOOT_DIR" ||
+			echo "mounts: cannot mount $BOOT_DEV on $BOOT_DIR" >&2
+	fi
+	if is_mounted "$DATA_DIR"; then
+		:
+	elif [ -b "$DATA_DEV" ]; then
+		# noatime: читання не пише на картку; data=ordered (типово) + журнал ext4 відновлюють
+		# файлову систему після висмикнутого живлення.
+		mount -t ext4 -o noatime,nodev,nosuid,noexec "$DATA_DEV" "$DATA_DIR" ||
+			echo "mounts: cannot mount $DATA_DEV on $DATA_DIR, log goes to the root fs" >&2
+	else
+		echo "mounts: no $DATA_DEV, $DATA_DIR is on the root fs" >&2
+	fi
+	echo "mounts: $BOOT_DIR and $DATA_DIR ready"
+}
+
+stop() {
+	sync
+	is_mounted "$DATA_DIR" && umount "$DATA_DIR"
+	is_mounted "$BOOT_DIR" && umount "$BOOT_DIR"
+	return 0
+}
+
+case "$1" in
+start) start ;;
+stop) stop ;;
+restart)
+	stop
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}" >&2
+	exit 1
+	;;
+esac

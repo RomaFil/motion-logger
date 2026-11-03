@@ -1,0 +1,46 @@
+#!/bin/sh
+# Синхронізація годинника по мережі (BusyBox ntpd). У Pi 5 без батарейки RTC після старту
+# годинник показує 1970, тож unix_ms у рядку відкриття логу без NTP не має сенсу; справжній час
+# без мережі дає лише GPS (поле utc у рядках gps). ntpd сам пробує знову, поки мережі нема.
+# Лише POSIX sh (BusyBox ash).
+DAEMON=/usr/sbin/ntpd
+PIDFILE=/var/run/ntpd.pid
+NTP_SERVERS="pool.ntp.org"
+
+# Інші сервери (наприклад, роутер): NTP_SERVERS="192.168.88.1 pool.ntp.org"
+[ -r /etc/default/ntp ] && . /etc/default/ntp
+
+start() {
+	[ -x "$DAEMON" ] || {
+		echo "ntp: $DAEMON not installed (CONFIG_NTPD in busybox.fragment)" >&2
+		return 0
+	}
+	peers=
+	for server in $NTP_SERVERS; do
+		peers="$peers -p $server"
+	done
+	# -n: не йти у фон самому (це робить start-stop-daemon і пише PID-файл)
+	# shellcheck disable=SC2086
+	start-stop-daemon -S -q -b -m -p "$PIDFILE" -x "$DAEMON" -- -n $peers &&
+		echo "ntp: started"
+}
+
+stop() {
+	start-stop-daemon -K -q -p "$PIDFILE"
+	rm -f "$PIDFILE"
+	echo "ntp: stopped"
+	return 0
+}
+
+case "$1" in
+start) start ;;
+stop) stop ;;
+restart)
+	stop
+	start
+	;;
+*)
+	echo "Usage: $0 {start|stop|restart}" >&2
+	exit 1
+	;;
+esac

@@ -3,7 +3,7 @@
 Файли, специфічні для нашої плати:
 
 - `rootfs_overlay/` копіюється в корінь образу (скрипт автозапуску `etc/init.d/S99motion_logger`);
-- `linux.fragment`, `busybox.fragment` (кроки 4.5, 4.6): наші зміни до налаштувань ядра й BusyBox;
+- `linux.fragment`, `busybox.fragment` (кроки 4.5, 4.6): наші зміни до налаштувань ядра й BusyBox (у BusyBox: `ntpd`);
 - `dts/`: DTS-overlay для датчиків (крок 4.6).
 
 ## Образ: що додано до стокового raspberrypi5_defconfig
@@ -12,4 +12,9 @@
 - Консоль входу: `BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"`, 115200; повідомлення ядра на GPIO14 не видно (драйвер `pl011-axi`), вони йдуть на JST-роз'єм (`ttyAMA10`).
 - Wi-Fi: `wpa_supplicant.conf` (шаблон для розділу boot, кладе `post-image.sh`), `rootfs_overlay/etc/init.d/S41wifi`
   (служба), `rootfs_overlay/usr/sbin/wifi` (команда для правки мереж на платі); тест `tests/check_wifi.sh`.
+- Служби `rootfs_overlay/etc/init.d`: `S12mounts` (`/boot` лише для читання, `/data` з третього розділу), `S41wifi`,
+  `S49ntp` (BusyBox `ntpd`), `S99motion_logger` (з наглядачем, що перезапускає програму); `S15watchdog` ставить BusyBox.
+- `genimage.cfg.in`: розділи boot, rootfs і `data` (ext4, 1 ГБ, мітка `data`).
+- `rootfs_overlay/etc/default/dropbear`: ключ з `/boot/authorized_keys` і вхід лише за ключем.
+- Тести скриптів: `tests/check_init_script.sh`, `tests/check_wifi.sh`, `tests/check_overlay.sh`.
 - `dropbear` (SSH по Ethernet), демонстраційний пароль root у defconfig (ніде більше не використовується).
