@@ -18,10 +18,21 @@
 #include "ring_buffer.h"
 #include "sensor.h"
 
+/**
+ * @brief Скільки збоїв читання підряд терпимо, перш ніж здатися (при 100 Гц це близько 5 с).
+ *
+ * Поодинокий збій шини I2C чи SPI (-EIO, -EREMOTEIO, -ETIMEDOUT, -EAGAIN, -EBUSY: завада, дріт,
+ * що відходить) не зупиняє запис: відлік пропускається й рахується в stats->errors. Лише довга
+ * серія збоїв підряд означає, що датчик зник; тоді читач повертає помилку, програма завершується,
+ * а служба S99motion_logger її перезапускає.
+ */
+#define SENSOR_READER_MAX_CONSECUTIVE_ERRORS 500
+
 /** @brief Підсумок роботи читача. */
 struct sensor_reader_stats {
 	size_t received; /**< скільки відліків отримано від датчика */
 	size_t dropped;	 /**< скільки з них не влізло в повний буфер і втрачено */
+	size_t errors;	 /**< скільки разів читання дало тимчасову помилку (відлік пропущено) */
 };
 
 /**
@@ -39,8 +50,9 @@ struct sensor_reader_stats {
  * @param stop   прапорець зупинки
  * @param stats  сюди пишеться підсумок; поля обнуляються на початку
  * @return 0, якщо дані скінчились (-ENODATA від датчика) або була зупинка; -EINVAL, якщо
- *         будь-який покажчик NULL; інакше мінус код помилки датчика. Код -EINTR від
- *         датчика не вважається помилкою: читач повертається до перевірки прапорця зупинки.
+ *         будь-який покажчик NULL; інакше мінус код помилки датчика (тимчасова помилка лише
+ *         після SENSOR_READER_MAX_CONSECUTIVE_ERRORS разів підряд). Код -EINTR від датчика не
+ *         вважається помилкою: читач повертається до перевірки прапорця зупинки.
  */
 int sensor_reader_run(struct sensor *sensor, enum sample_source source, struct ring_buffer *rb,
 		      const volatile sig_atomic_t *stop, struct sensor_reader_stats *stats);

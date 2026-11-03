@@ -36,6 +36,10 @@ struct nmea_fix {
 	double speed_knots;	  /**< швидкість у вузлах (1 вузол = 1,852 км/год) */
 	bool has_satellites;	  /**< лише GGA: чи було поле кількості супутників */
 	uint8_t satellites;	  /**< скільки супутників модуль використовує */
+	bool has_date;		  /**< лише RMC: чи було поле дати ddmmyy */
+	uint16_t year;		  /**< рік повністю: yy 80..99 дає 19yy, інакше 20yy */
+	uint8_t month;		  /**< 1..12 */
+	uint8_t day;		  /**< 1..31 */
 };
 
 /**
@@ -54,5 +58,15 @@ int nmea_parse_rmc(const char *sentence, struct nmea_fix *fix);
  * Параметри й коди помилок ті самі, що в nmea_parse_rmc().
  */
 int nmea_parse_gga(const char *sentence, struct nmea_fix *fix);
+
+/**
+ * @brief Час UTC рядка RMC у секундах Unix (від 1970-01-01 00:00:00 UTC).
+ *
+ * Потрібні і дата (has_date), і час (has_time): з GPS це єдине джерело справжнього часу на платі
+ * без батарейки RTC.
+ *
+ * @return секунди Unix; -1, якщо fix NULL або дати чи часу в рядку не було
+ */
+int64_t nmea_utc_seconds(const struct nmea_fix *fix);
 
 #endif /* NMEA_PARSER_H */

@@ -229,6 +229,57 @@ static void test_failed_parse_leaves_result_untouched(void)
 	CHECK(memcmp(&fix, &before, sizeof(fix)) == 0);
 }
 
+static void test_rmc_date_gives_utc_seconds(void)
+{
+	struct nmea_fix fix;
+
+	/* 23.03.1994 12:35:19 UTC */
+	CHECK(nmea_parse_rmc(RMC, &fix) == 0);
+	CHECK(fix.has_date && fix.day == 23 && fix.month == 3 && fix.year == 1994);
+	CHECK(nmea_utc_seconds(&fix) == 764426119);
+
+	/* 28.10.2026 12:00:08 UTC, рядок як від NEO-6M */
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,120008.00,A,5027.0060,N,03031.4040,E,0.0,90.0,"
+					   "281026,,,A"),
+			     &fix) == 0);
+	CHECK(nmea_utc_seconds(&fix) == 1793188808);
+
+	/* Високосний день і кінець діапазону двоцифрових років */
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,000000,V,,,,,,,290200,,"), &fix) == 0);
+	CHECK(nmea_utc_seconds(&fix) == 951782400);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,235959,V,,,,,,,311279,,"), &fix) == 0);
+	CHECK(nmea_utc_seconds(&fix) == 3471292799);
+}
+
+static void test_missing_date_or_time_gives_no_utc(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,000000,V,,,,,,,,,"), &fix) == 0);
+	CHECK(!fix.has_date && nmea_utc_seconds(&fix) == -1);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,,V,,,,,,,281026,,"), &fix) == 0);
+	CHECK(fix.has_date && !fix.has_time && nmea_utc_seconds(&fix) == -1);
+	/* Рядок, обрізаний одразу після швидкості: дати нема, це не помилка */
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,000000,V,,,,,"), &fix) == 0);
+	CHECK(!fix.has_date);
+	CHECK(nmea_parse_gga(GGA, &fix) == 0);
+	CHECK(nmea_utc_seconds(&fix) == -1);
+	CHECK(nmea_utc_seconds(NULL) == -1);
+}
+
+static void test_invalid_dates_are_rejected(void)
+{
+	struct nmea_fix fix;
+
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,000394,,"), &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,320394,,"), &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,230094,,"), &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,231394,,"), &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,2303945,,"), &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,23039,,"), &fix) == -EINVAL);
+	CHECK(nmea_parse_rmc(make_sentence("GPRMC,123519,A,,,,,,,23a394,,"), &fix) == -EINVAL);
+}
+
 static void test_null_arguments_are_rejected(void)
 {
 	struct nmea_fix fix;
@@ -255,6 +306,9 @@ int main(void)
 	test_invalid_fields_are_rejected();
 	test_too_few_fields_are_rejected();
 	test_failed_parse_leaves_result_untouched();
+	test_rmc_date_gives_utc_seconds();
+	test_missing_date_or_time_gives_no_utc();
+	test_invalid_dates_are_rejected();
 	test_null_arguments_are_rejected();
 
 	if (failures != 0) {

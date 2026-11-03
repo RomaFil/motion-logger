@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -246,8 +247,83 @@ static void test_samples_follow_the_requested_rate(void)
 	remove_device(dir);
 }
 
+/* Каталог «/sys/bus/iio/devices» з пристроями devices[i] на іменах names[i]. */
+static void make_devices_dir(char *base, const char *const *names, size_t count)
+{
+	char path[sizeof(TEMP_TEMPLATE) + 32];
+	size_t i;
+
+	strcpy(base, TEMP_TEMPLATE);
+	CHECK(mkdtemp(base) != NULL);
+	for (i = 0; i < count; i++) {
+		snprintf(path, sizeof(path), "%s/iio:device%zu", base, i);
+		CHECK(mkdir(path, 0700) == 0);
+		write_file(path, "name", names[i]);
+	}
+	/* Сторонній запис у каталозі (trigger0) не плутає пошук */
+	snprintf(path, sizeof(path), "%s/trigger0", base);
+	CHECK(mkdir(path, 0700) == 0);
+	write_file(path, "name", "mpu6050\n");
+}
+
+static void remove_devices_dir(const char *base, size_t count)
+{
+	char path[sizeof(TEMP_TEMPLATE) + 32];
+	size_t i;
+
+	for (i = 0; i < count; i++) {
+		snprintf(path, sizeof(path), "%s/iio:device%zu", base, i);
+		remove_file(path, "name");
+		rmdir(path);
+	}
+	snprintf(path, sizeof(path), "%s/trigger0", base);
+	remove_file(path, "name");
+	rmdir(path);
+	rmdir(base);
+}
+
+static void test_find_by_name(void)
+{
+	static const char *const names[] = {"adxl345\n", "mpu6050\n", "hmc5883l\n"};
+	char base[sizeof(TEMP_TEMPLATE)];
+	char expected[IIO_ACCEL_PATH_SIZE];
+	char out[IIO_ACCEL_PATH_SIZE];
+	char tiny[8];
+
+	make_devices_dir(base, names, 3);
+
+	CHECK(iio_accel_find(base, "mpu6050", out, sizeof(out)) == 0);
+	snprintf(expected, sizeof(expected), "%s/iio:device1", base);
+	CHECK(strcmp(out, expected) == 0);
+	CHECK(iio_accel_find(base, "adxl345", out, sizeof(out)) == 0);
+	snprintf(expected, sizeof(expected), "%s/iio:device0", base);
+	CHECK(strcmp(out, expected) == 0);
+
+	CHECK(iio_accel_find(base, "bmp180", out, sizeof(out)) == -ENODEV);
+	CHECK(iio_accel_find(base, "mpu", out, sizeof(out)) == -ENODEV); /* лише повне ім'я */
+	CHECK(iio_accel_find(base, "mpu6050", tiny, sizeof(tiny)) == -ENAMETOOLONG);
+	CHECK(iio_accel_find(base, "", out, sizeof(out)) == -EINVAL);
+	CHECK(iio_accel_find(NULL, "mpu6050", out, sizeof(out)) == -EINVAL);
+	CHECK(iio_accel_find("/no/such/dir", "mpu6050", out, sizeof(out)) == -ENOENT);
+
+	remove_devices_dir(base, 3);
+}
+
+static void test_find_reports_ambiguous_name(void)
+{
+	static const char *const names[] = {"mpu6050\n", "mpu6050\n"};
+	char base[sizeof(TEMP_TEMPLATE)];
+	char out[IIO_ACCEL_PATH_SIZE];
+
+	make_devices_dir(base, names, 2);
+	CHECK(iio_accel_find(base, "mpu6050", out, sizeof(out)) == -ENOTUNIQ);
+	remove_devices_dir(base, 2);
+}
+
 int main(void)
 {
+	test_find_by_name();
+	test_find_reports_ambiguous_name();
 	test_open_rejects_bad_arguments();
 	test_open_reports_missing_device();
 	test_samples_are_converted_to_g();

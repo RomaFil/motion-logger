@@ -21,7 +21,17 @@
  *     {"t_ms":21000,"src":"gps","fix":true,"lat":50.450100,"lon":30.523400,"speed_knots":0.30,"sats":8}
  *     {"t_ms":3000,"src":"gps","fix":false,"sats":0}
  *   без фіксації координат нема взагалі (нульову широту не можна приймати за реальну точку);
- *   sats дорівнює null, якщо рядка GGA ще не було.
+ *   sats дорівнює null, якщо рядка GGA ще не було. Коли модуль знає дату й час, у кінці рядка
+ *   є ще "utc":"2026-10-28T12:00:08Z" (час із супутників: справжній, навіть без RTC і мережі).
+ *
+ *   кнопка на платі (SAMPLE_SOURCE_BUTTON), по рядку на натискання:
+ *     {"t_ms":52100,"src":"button","button":1,"event":"PRESS"}
+ *
+ *   відкриття файлу (лише через log_writer_start_config з open_marker): перший рядок після
+ *   кожного запуску програми й кожної ротації. Монотонний t_ms після перезавантаження плати
+ *   починається з нуля; boot_id (з /proc/sys/kernel/random/boot_id) каже, до якого запуску
+ *   системи належать рядки далі, unix_ms це звичайний годинник (без NTP і RTC може бути 1970):
+ *     {"t_ms":5120,"src":"log","event":"open","boot_id":"8f0c…","unix_ms":1793734650797}
  *
  * Чому для основного акселерометра не кожен відлік: 100 рядків на секунду це 6 КБ/с, години
  * логу, з якого людині треба вручну витягувати «коли я йшов». Подій і підсумку секунди досить;
@@ -46,6 +56,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "device_status.h"
 #include "motion_events.h"
 #include "motion_report.h"
 #include "ring_buffer.h"
@@ -56,14 +67,37 @@
 /** @brief Найбільша довжина одного рядка логу разом із завершальним нулем. */
 #define LOG_WRITER_LINE_SIZE 192
 
+/** @brief Найбільша довжина шляху до лог-файлу разом із завершальним нулем. */
+#define LOG_WRITER_PATH_SIZE 256
+
+/** @brief Найбільше старих файлів при ротації (path.1 … path.99). */
+#define LOG_WRITER_MAX_KEEP 99
+
+/** @brief Як часто дані скидаються на картку (fdatasync), мілісекунди. */
+#define LOG_WRITER_SYNC_INTERVAL_MS 5000
+
+/** @brief Права нового лог-файлу: лише власник (у лозі координати GPS). */
+#define LOG_WRITER_FILE_MODE 0600
+
 /** @brief Підсумок роботи записувача. */
 struct log_writer_stats {
-	size_t written; /**< скільки рядків записано в файл (усіх видів разом) */
-	size_t events;	/**< з них скільки рядків-подій руху */
-	size_t rows;	/**< з них скільки підсумків секунди основного акселерометра */
-	size_t aux;	/**< з них скільки рядків додаткового акселерометра */
-	size_t gps;	/**< з них скільки рядків GPS */
-	size_t failed;	/**< скільки записів не вдалося обробити чи записати */
+	size_t written;	  /**< скільки рядків записано в файл (усіх видів разом) */
+	size_t events;	  /**< з них скільки рядків-подій руху */
+	size_t rows;	  /**< з них скільки підсумків секунди основного акселерометра */
+	size_t aux;	  /**< з них скільки рядків додаткового акселерометра */
+	size_t gps;	  /**< з них скільки рядків GPS */
+	size_t buttons;	  /**< з них скільки рядків натискань кнопок */
+	size_t failed;	  /**< скільки записів не вдалося обробити чи записати */
+	size_t rotations; /**< скільки разів файл ротувався */
+};
+
+/** @brief Налаштування записувача для log_writer_start_config(). */
+struct log_writer_config {
+	const char *path;	      /**< лог-файл */
+	uint64_t max_bytes;	      /**< ротація, коли файл досяг розміру; 0 = без ротації */
+	unsigned int keep;	      /**< скільки старих файлів лишати: 1..LOG_WRITER_MAX_KEEP */
+	bool open_marker;	      /**< чи писати рядок "src":"log","event":"open" */
+	struct device_status *status; /**< куди повідомляти стан для світлодіодів, або NULL */
 };
 
 /** @brief Стан записувача. Поля змінюй лише через функції log_writer_*. */
@@ -73,6 +107,14 @@ struct log_writer {
 	int64_t last_aux_ms; /**< мітка часу останнього записаного рядка accel2 */
 	bool aux_seen;	     /**< чи писали вже рядок accel2 */
 	int fd;
+	char path[LOG_WRITER_PATH_SIZE];
+	uint64_t max_bytes;
+	unsigned int keep;
+	bool open_marker;
+	uint64_t size;	      /**< поточний розмір файлу */
+	bool dirty;	      /**< чи є записане після останнього fdatasync */
+	int64_t last_sync_ms; /**< коли востаннє викликали fdatasync */
+	struct device_status *status;
 	pthread_t thread;
 	atomic_bool stop_requested;
 	struct log_writer_stats stats;
@@ -139,6 +181,24 @@ int log_writer_format_aux(char *out, size_t size, int64_t timestamp_ms, double x
 int log_writer_format_gps(char *out, size_t size, const struct sample *sample);
 
 /**
+ * @brief Складає рядок натискання кнопки.
+ *
+ * @return довжина рядка; -EINVAL, якщо out NULL або button < 1; -ENOSPC, якщо не влізає
+ */
+int log_writer_format_button(char *out, size_t size, int64_t timestamp_ms, int button);
+
+/**
+ * @brief Складає рядок відкриття файлу (див. опис формату на початку файлу).
+ *
+ * @param boot_id ідентифікатор завантаження (36 символів 0-9, a-f, '-'), або NULL: тоді null
+ * @param unix_ms звичайний годинник, мілісекунди Unix
+ * @return довжина рядка; -EINVAL, якщо out NULL або boot_id недопустимий; -ENOSPC, якщо не
+ *         влізає
+ */
+int log_writer_format_open(char *out, size_t size, int64_t timestamp_ms, const char *boot_id,
+			   int64_t unix_ms);
+
+/**
  * @brief Відкриває лог-файл і запускає потік, що забирає записи з буфера.
  *
  * Файл створюється, якщо його нема, і дописується в кінець, якщо є.
@@ -150,6 +210,20 @@ int log_writer_format_gps(char *out, size_t size, const struct sample *sample);
  *         або створення потоку
  */
 int log_writer_start(struct log_writer *lw, struct ring_buffer *rb, const char *path);
+
+/**
+ * @brief Те саме, що log_writer_start(), але з ротацією, рядком відкриття і станом для LED.
+ *
+ * Ротація: коли файл досяг max_bytes, path.(keep-1) стає path.keep (найстаріший path.keep
+ * затирається), …, path стає path.1, і запис іде в новий порожній path. Дані скидаються на картку
+ * (fdatasync) не рідше ніж раз на LOG_WRITER_SYNC_INTERVAL_MS, перед ротацією і при зупинці: при
+ * висмикнутому живленні губиться не більше кількох секунд.
+ *
+ * @return 0 при успіху; -EINVAL при NULL, keep поза 1..LOG_WRITER_MAX_KEEP при max_bytes > 0;
+ *         -ENAMETOOLONG, якщо шлях задовгий; інакше мінус код помилки відкриття чи потоку
+ */
+int log_writer_start_config(struct log_writer *lw, struct ring_buffer *rb,
+			    const struct log_writer_config *config);
 
 /**
  * @brief Зупиняє записувач: дописує все, що ще лежить у буфері, закриває файл.

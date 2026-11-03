@@ -4,6 +4,7 @@
  */
 #include "iio_accel.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -35,6 +36,10 @@ static int read_raw(int fd, double *value);
 static int read_scale(const char *dir, int axis, double *scale);
 static int wait_until(int64_t due_ms);
 static void close_all(struct iio_accel *dev);
+static int read_name(const char *devices_dir, const char *entry, char *out, size_t size);
+
+#define DEVICE_PREFIX "iio:device"
+#define NAME_TEXT_SIZE 64
 
 int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz)
 {
@@ -82,6 +87,75 @@ int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int r
 fail:
 	close_all(dev);
 	return result;
+}
+
+int iio_accel_find(const char *devices_dir, const char *name, char *out, size_t size)
+{
+	struct dirent *entry;
+	DIR *dir;
+	int found = 0;
+	int result = 0;
+
+	if (devices_dir == NULL || name == NULL || name[0] == '\0' || out == NULL || size == 0) {
+		return -EINVAL;
+	}
+	dir = opendir(devices_dir);
+	if (dir == NULL) {
+		return -errno;
+	}
+
+	while ((entry = readdir(dir)) != NULL) {
+		char device_name[NAME_TEXT_SIZE];
+		int length;
+
+		if (strncmp(entry->d_name, DEVICE_PREFIX, strlen(DEVICE_PREFIX)) != 0) {
+			continue;
+		}
+		if (read_name(devices_dir, entry->d_name, device_name, sizeof(device_name)) < 0 ||
+		    strcmp(device_name, name) != 0) {
+			continue;
+		}
+		found++;
+		length = snprintf(out, size, "%s/%s", devices_dir, entry->d_name);
+		if (length < 0 || (size_t)length >= size) {
+			result = -ENAMETOOLONG;
+		}
+	}
+	closedir(dir);
+
+	if (found == 0) {
+		return -ENODEV;
+	}
+	if (found > 1) {
+		return -ENOTUNIQ;
+	}
+
+	return result;
+}
+
+/* Читає devices_dir/entry/name без кінцевого '\n'. */
+static int read_name(const char *devices_dir, const char *entry, char *out, size_t size)
+{
+	char path[IIO_ACCEL_PATH_SIZE];
+	ssize_t length;
+	int fd;
+
+	if (snprintf(path, sizeof(path), "%s/%s/name", devices_dir, entry) >= (int)sizeof(path)) {
+		return -ENAMETOOLONG;
+	}
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return -errno;
+	}
+	length = read(fd, out, size - 1);
+	close(fd);
+	if (length < 0) {
+		return -EIO;
+	}
+	out[length] = '\0';
+	out[strcspn(out, "\n")] = '\0';
+
+	return 0;
 }
 
 static int read_accel(struct sensor *self, struct accel_sample *out)

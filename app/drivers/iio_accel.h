@@ -20,6 +20,7 @@
 #ifndef IIO_ACCEL_H
 #define IIO_ACCEL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "sensor.h"
@@ -49,5 +50,24 @@ struct iio_accel {
  *         -EPROTO, якщо масштаб не додатне скінченне число
  */
 int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz);
+
+/** @brief Де ядро показує пристрої IIO. */
+#define IIO_ACCEL_DEVICES_DIR "/sys/bus/iio/devices"
+
+/**
+ * @brief Шукає пристрій IIO за іменем драйвера (вміст файлу name, наприклад mpu6050, adxl345).
+ *
+ * Номер iio:deviceN залежить від порядку, в якому підключились драйвери, а ім'я ні: так у
+ * налаштуваннях можна писати --iio mpu6050 замість номера, який треба перевіряти на платі.
+ *
+ * @param devices_dir каталог з iio:device*, зазвичай IIO_ACCEL_DEVICES_DIR
+ * @param name        ім'я пристрою
+ * @param out         сюди пишеться шлях до каталогу пристрою
+ * @param size        розмір out
+ * @return 0 при успіху; -EINVAL при NULL чи порожньому імені; -ENODEV, якщо такого пристрою
+ *         нема; -ENOTUNIQ, якщо з таким іменем кілька пристроїв (тоді треба шлях);
+ *         -ENAMETOOLONG, якщо шлях не влазить; інакше мінус errno відкриття каталогу
+ */
+int iio_accel_find(const char *devices_dir, const char *name, char *out, size_t size);
 
 #endif /* IIO_ACCEL_H */

@@ -81,7 +81,12 @@ GPS_NO_FIX_LINES=$(count_lines '"src":"gps","fix":false')
 [ "$GPS_NO_FIX_LINES" -ge 1 ] || fail "no gps line without a fix"
 
 # Один акселерометр лежить нерухомо на столі: жодної події руху.
-[ "$(count_lines '"event":')" -eq 0 ] || fail "motion events for a board lying still"
+[ "$(count_lines '"event":"MOVE_')" -eq 0 ] || fail "motion events for a board lying still"
+
+# Перший рядок: відкриття файлу; у рядках GPS є час UTC із супутників.
+head -n 1 "$LOG" | grep -q '"src":"log","event":"open"' || fail "no open line at the top of the log"
+[ "$(count_lines '"src":"gps".*"utc":"20[0-9][0-9]-[01][0-9]-[0-3][0-9]T')" -ge 1 ] ||
+	fail "no gps line with the utc time"
 
 # Додатковий акселерометр: не більше рядка на секунду і значення z = 1 g.
 [ "$AUX_LINES" -le $((RUN_SECONDS + 1)) ] || fail "accel2 is written more than once per second"

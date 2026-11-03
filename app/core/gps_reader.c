@@ -30,6 +30,9 @@ struct line_assembler {
 struct reader_state {
 	struct line_assembler line;
 	int satellites; /* з останнього GGA, або SATELLITES_UNKNOWN */
+	/* Для термінала (послідовного порту) read() == 0 означає «даних зараз нема», а не кінець:
+	 * порт налаштовано з VMIN = 0, VTIME = 0. Кінець даних буває лише в каналу чи файлу. */
+	bool zero_read_is_eof;
 };
 
 /* Приватні функції описано тут, а визначено внизу: публічна функція йде першою. */
@@ -55,6 +58,7 @@ int gps_reader_run(int source_fd, struct ring_buffer *rb, const volatile sig_ato
 		return -EINVAL;
 	}
 	memset(stats, 0, sizeof(*stats));
+	state.zero_read_is_eof = !isatty(source_fd);
 
 	epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 	if (epoll_fd < 0) {
@@ -118,7 +122,7 @@ static int read_available(int source_fd, struct ring_buffer *rb, struct reader_s
 		return -errno;
 	}
 	if (bytes_read == 0) {
-		return 1;
+		return state->zero_read_is_eof ? 1 : 0;
 	}
 
 	for (i = 0; i < bytes_read; i++) {
@@ -195,7 +199,8 @@ static void store_gps_sample(const struct nmea_fix *fix, int satellites, struct 
 	struct sample item = {.source = SAMPLE_SOURCE_GPS,
 			      .time_ms = monotonic_ms(),
 			      .gps_fix = fix->valid && fix->has_position,
-			      .satellites = satellites};
+			      .satellites = satellites,
+			      .gps_utc_s = nmea_utc_seconds(fix)};
 
 	if (item.gps_fix) {
 		item.latitude_deg = fix->latitude_degrees;

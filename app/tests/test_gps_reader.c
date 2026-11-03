@@ -108,6 +108,7 @@ static void test_fix_sample_carries_position_and_satellites(void)
 	CHECK(fabs(item.speed_knots) < EPSILON);
 	CHECK(item.satellites == 7);
 	CHECK(item.time_ms > 0);
+	CHECK(item.gps_utc_s == 1793188808); /* 28.10.2026 12:00:08 UTC з полів часу й дати RMC */
 	CHECK(ring_buffer_is_empty(&fx.rb));
 
 	fixture_destroy(&fx);
@@ -131,6 +132,7 @@ static void test_no_fix_sample_has_no_coordinates(void)
 	CHECK(fabs(item.latitude_deg) < EPSILON);
 	CHECK(fabs(item.longitude_deg) < EPSILON);
 	CHECK(item.satellites == -1);
+	CHECK(item.gps_utc_s == 1793188800); /* час модуль знає й без фіксації */
 
 	fixture_destroy(&fx);
 }

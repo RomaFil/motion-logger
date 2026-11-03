@@ -34,6 +34,7 @@ struct fake_sensor {
 	size_t read_calls;
 	size_t fail_at; /* номер відліку, перед яким повернути fail_code (NEVER_FAIL = ніколи) */
 	int fail_code;
+	size_t fail_count;    /* скільки разів підряд повернути fail_code, далі віддавати відліки */
 	bool interrupt_first; /* перший виклик read повертає -EINTR, не віддавши відліку */
 };
 
@@ -45,7 +46,8 @@ static int fake_read(struct sensor *self, struct accel_sample *out)
 	if (fake->interrupt_first && fake->read_calls == 1) {
 		return -EINTR;
 	}
-	if (fake->next == fake->fail_at) {
+	if (fake->next == fake->fail_at && fake->fail_count > 0) {
+		fake->fail_count--;
 		return fake->fail_code;
 	}
 	if (fake->next >= SAMPLE_COUNT) {
@@ -67,6 +69,7 @@ static void init_fake(struct fake_sensor *fake)
 	fake->read_calls = 0;
 	fake->fail_at = NEVER_FAIL;
 	fake->fail_code = 0;
+	fake->fail_count = SIZE_MAX;
 	fake->interrupt_first = false;
 	for (i = 0; i < SAMPLE_COUNT; i++) {
 		fake->samples[i].time_ms = (int64_t)i * 10;
@@ -151,7 +154,8 @@ static void test_interrupted_read_is_retried(void)
 	ring_buffer_destroy(&rb);
 }
 
-/* Помилка датчика (не кінець даних) іде нагору, а вже прийняті відліки лишаються в підсумку. */
+/* Постійна помилка датчика (не кінець даних і не збій шини) іде нагору одразу, а вже прийняті
+ * відліки лишаються в підсумку. */
 static void test_sensor_error_is_returned(void)
 {
 	static volatile sig_atomic_t never_stop;
@@ -163,11 +167,86 @@ static void test_sensor_error_is_returned(void)
 	CHECK(ring_buffer_init(&rb, storage, BUFFER_CAPACITY) == 0);
 	init_fake(&fake);
 	fake.fail_at = 2;
+	fake.fail_code = -EPROTO;
+
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) ==
+	      -EPROTO);
+	CHECK(stats.received == 2);
+	CHECK(stats.errors == 0);
+	CHECK(fake.read_calls == 3);
+	CHECK(ring_buffer_count(&rb) == 2);
+
+	ring_buffer_destroy(&rb);
+}
+
+/* Кілька збоїв шини підряд (-EIO, -EREMOTEIO): відліки пропущено, запис іде далі. */
+static void test_transient_errors_are_skipped(void)
+{
+	static volatile sig_atomic_t never_stop;
+	static const int codes[] = {-EIO, -EREMOTEIO, -ETIMEDOUT, -EAGAIN, -EBUSY};
+	size_t c;
+
+	for (c = 0; c < sizeof(codes) / sizeof(codes[0]); c++) {
+		struct sample storage[BUFFER_CAPACITY];
+		struct ring_buffer rb;
+		struct fake_sensor fake;
+		struct sensor_reader_stats stats;
+
+		CHECK(ring_buffer_init(&rb, storage, BUFFER_CAPACITY) == 0);
+		init_fake(&fake);
+		fake.fail_at = 2;
+		fake.fail_code = codes[c];
+		fake.fail_count = 3;
+
+		CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop,
+					&stats) == 0);
+		CHECK(stats.received == SAMPLE_COUNT);
+		CHECK(stats.errors == 3);
+		CHECK(ring_buffer_count(&rb) == SAMPLE_COUNT);
+
+		ring_buffer_destroy(&rb);
+	}
+}
+
+/* Датчик зник зовсім: після SENSOR_READER_MAX_CONSECUTIVE_ERRORS збоїв підряд читач здається. */
+static void test_endless_transient_errors_give_up(void)
+{
+	static volatile sig_atomic_t never_stop;
+	struct sample storage[BUFFER_CAPACITY];
+	struct ring_buffer rb;
+	struct fake_sensor fake;
+	struct sensor_reader_stats stats;
+
+	CHECK(ring_buffer_init(&rb, storage, BUFFER_CAPACITY) == 0);
+	init_fake(&fake);
+	fake.fail_at = 1;
 	fake.fail_code = -EIO;
 
 	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == -EIO);
-	CHECK(stats.received == 2);
-	CHECK(ring_buffer_count(&rb) == 2);
+	CHECK(stats.received == 1);
+	CHECK(stats.errors == SENSOR_READER_MAX_CONSECUTIVE_ERRORS);
+
+	ring_buffer_destroy(&rb);
+}
+
+/* Лічильник «підряд» скидається після вдалого відліку: розкидані збої не накопичуються. */
+static void test_error_streak_resets_after_success(void)
+{
+	static volatile sig_atomic_t never_stop;
+	struct sample storage[BUFFER_CAPACITY];
+	struct ring_buffer rb;
+	struct fake_sensor fake;
+	struct sensor_reader_stats stats;
+
+	CHECK(ring_buffer_init(&rb, storage, BUFFER_CAPACITY) == 0);
+	init_fake(&fake);
+	fake.fail_at = 1;
+	fake.fail_code = -EIO;
+	fake.fail_count = SENSOR_READER_MAX_CONSECUTIVE_ERRORS - 1;
+
+	CHECK(sensor_reader_run(&fake.base, SAMPLE_SOURCE_ACCEL, &rb, &never_stop, &stats) == 0);
+	CHECK(stats.received == SAMPLE_COUNT);
+	CHECK(stats.errors == SENSOR_READER_MAX_CONSECUTIVE_ERRORS - 1);
 
 	ring_buffer_destroy(&rb);
 }
@@ -245,6 +324,9 @@ int main(void)
 	test_samples_arrive_in_order_with_all_fields();
 	test_interrupted_read_is_retried();
 	test_sensor_error_is_returned();
+	test_transient_errors_are_skipped();
+	test_endless_transient_errors_give_up();
+	test_error_streak_resets_after_success();
 	test_full_buffer_counts_dropped_and_keeps_oldest();
 	test_source_parameter_is_stored_in_every_sample();
 	test_stop_flag_prevents_any_read();

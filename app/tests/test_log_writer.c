@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -702,6 +703,214 @@ static void test_unknown_source_counts_as_failed(void)
 	unlink(path);
 }
 
+/* Скільки рядків у файлі; -1, якщо файла нема. Перший рядок кладе в first (може бути NULL). */
+static long count_file_lines(const char *path, char *first, size_t first_size)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	long lines = 0;
+	FILE *file = fopen(path, "r");
+
+	if (file == NULL) {
+		return -1;
+	}
+	while (fgets(line, sizeof(line), file) != NULL) {
+		if (lines == 0 && first != NULL) {
+			snprintf(first, first_size, "%s", line);
+		}
+		lines++;
+	}
+	fclose(file);
+
+	return lines;
+}
+
+static void test_format_gps_adds_utc_when_known(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gps_item(21000, true, 8);
+
+	item.gps_utc_s = 1793188808; /* 2026-10-28 12:00:08 UTC */
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gps\",\"fix\":true,\"lat\":50.450100,"
+			   "\"lon\":30.523400,\"speed_knots\":0.30,\"sats\":8,"
+			   "\"utc\":\"2026-10-28T12:00:08Z\"}\n") == 0);
+
+	item = make_gps_item(3000, false, -1);
+	item.gps_utc_s = 1793188808;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":3000,\"src\":\"gps\",\"fix\":false,\"sats\":null,"
+			   "\"utc\":\"2026-10-28T12:00:08Z\"}\n") == 0);
+
+	/* -1 (часу ще нема) і 0 (поле не заповнене) дають рядок без utc */
+	item.gps_utc_s = -1;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strstr(line, "utc") == NULL);
+}
+
+static void test_format_button_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+
+	CHECK(log_writer_format_button(line, sizeof(line), 52100, 1) > 0);
+	CHECK(strcmp(line,
+		     "{\"t_ms\":52100,\"src\":\"button\",\"button\":1,\"event\":\"PRESS\"}\n") ==
+	      0);
+	CHECK(log_writer_format_button(line, sizeof(line), 0, 0) == -EINVAL);
+	CHECK(log_writer_format_button(NULL, sizeof(line), 0, 1) == -EINVAL);
+	CHECK(log_writer_format_button(tiny, sizeof(tiny), 0, 1) == -ENOSPC);
+}
+
+static void test_format_open_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	const char *boot_id = "8f0c1d2e-3a4b-4c5d-9e6f-0123456789ab";
+
+	CHECK(log_writer_format_open(line, sizeof(line), 5120, boot_id, 1793734650797) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":5120,\"src\":\"log\",\"event\":\"open\","
+			   "\"boot_id\":\"8f0c1d2e-3a4b-4c5d-9e6f-0123456789ab\","
+			   "\"unix_ms\":1793734650797}\n") == 0);
+	CHECK(log_writer_format_open(line, sizeof(line), 1, NULL, 2) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":1,\"src\":\"log\",\"event\":\"open\",\"boot_id\":null,"
+			   "\"unix_ms\":2}\n") == 0);
+	/* Лапка чи велика літера в boot_id зламали б JSON або не схожі на справжній */
+	CHECK(log_writer_format_open(line, sizeof(line), 1, "8f0c1d2e-3a4b-4c5d-9e6f-0123456789a\"",
+				     2) == -EINVAL);
+	CHECK(log_writer_format_open(line, sizeof(line), 1, "8F0C1D2E-3A4B-4C5D-9E6F-0123456789AB",
+				     2) == -EINVAL);
+	CHECK(log_writer_format_open(line, sizeof(line), 1, "short", 2) == -EINVAL);
+	CHECK(log_writer_format_open(NULL, sizeof(line), 1, NULL, 2) == -EINVAL);
+}
+
+/* Новий лог-файл читає лише власник: у ньому координати. */
+static void test_new_log_file_is_private(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct stat info;
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	unlink(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, NULL) == 0);
+	CHECK(stat(path, &info) == 0);
+	CHECK((info.st_mode & 0777) == LOG_WRITER_FILE_MODE);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Рядок відкриття йде першим; стан для світлодіодів оновлюється з записів GPS і кнопки ні. */
+static void test_config_start_writes_open_marker_and_status(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct device_status status;
+	struct sample gps = make_gps_item(3000, true, 7);
+	struct sample button = {.source = SAMPLE_SOURCE_BUTTON, .time_ms = 4000, .value = 2};
+	char path[TEMP_PATH_SIZE];
+	char first[LOG_WRITER_LINE_SIZE] = "";
+	struct log_writer_config config = {.open_marker = true, .status = &status};
+
+	make_temp_path(path);
+	config.path = path;
+	device_status_init(&status, false, true, 1);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(ring_buffer_push(&rb, &gps) == 0);
+	CHECK(ring_buffer_push(&rb, &button) == 0);
+
+	CHECK(log_writer_start_config(&lw, &rb, &config) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.written == 3 && stats.gps == 1 && stats.buttons == 1 && stats.failed == 0);
+	CHECK(count_file_lines(path, first, sizeof(first)) == 3);
+	CHECK(strstr(first, "\"src\":\"log\",\"event\":\"open\"") != NULL);
+	CHECK(atomic_load(&status.gps_fix));
+	CHECK(atomic_load(&status.last_gps_ms) > 0);
+	CHECK(atomic_load(&status.last_failure_ms) == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Ротація: файли path, path.1, path.2 (keep = 2), кожен починається рядком відкриття, path.3 нема.
+ */
+static void test_rotation_keeps_limited_number_of_files(void)
+{
+	struct sample storage[PREFILLED_SAMPLES];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	char path[TEMP_PATH_SIZE];
+	char name[TEMP_PATH_SIZE + 8];
+	char first[LOG_WRITER_LINE_SIZE];
+	struct log_writer_config config = {.max_bytes = 400, .keep = 2, .open_marker = true};
+	unsigned int i;
+	int32_t value;
+
+	make_temp_path(path);
+	config.path = path;
+	CHECK(ring_buffer_init(&rb, storage, PREFILLED_SAMPLES) == 0);
+	for (value = 0; value < 100; value++) {
+		CHECK(push_value(&rb, value) == 0);
+	}
+
+	CHECK(log_writer_start_config(&lw, &rb, &config) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.rotations >= 3);
+	CHECK(stats.failed == 0);
+	for (i = 0; i <= 2; i++) {
+		struct stat info;
+
+		if (i == 0) {
+			snprintf(name, sizeof(name), "%s", path);
+		} else {
+			snprintf(name, sizeof(name), "%s.%u", path, i);
+		}
+		CHECK(count_file_lines(name, first, sizeof(first)) >= 1);
+		CHECK(strstr(first, "\"event\":\"open\"") != NULL);
+		CHECK(stat(name, &info) == 0 && info.st_size < 400 + LOG_WRITER_LINE_SIZE);
+	}
+	snprintf(name, sizeof(name), "%s.3", path);
+	CHECK(count_file_lines(name, NULL, 0) == -1);
+
+	for (i = 1; i <= 2; i++) {
+		snprintf(name, sizeof(name), "%s.%u", path, i);
+		unlink(name);
+	}
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+static void test_config_start_rejects_bad_arguments(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	char long_path[LOG_WRITER_PATH_SIZE];
+	struct log_writer_config config = {.path = "/tmp/x", .max_bytes = 100, .keep = 0};
+
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(log_writer_start_config(&lw, &rb, NULL) == -EINVAL);
+	CHECK(log_writer_start_config(&lw, &rb, &config) == -EINVAL);
+	config.keep = LOG_WRITER_MAX_KEEP + 1;
+	CHECK(log_writer_start_config(&lw, &rb, &config) == -EINVAL);
+
+	memset(long_path, 'a', sizeof(long_path) - 1);
+	long_path[0] = '/';
+	long_path[sizeof(long_path) - 1] = '\0';
+	config.path = long_path;
+	config.keep = 1;
+	CHECK(log_writer_start_config(&lw, &rb, &config) == -ENAMETOOLONG);
+	ring_buffer_destroy(&rb);
+}
+
 int main(void)
 {
 	test_format_line_produces_exact_json();
@@ -727,6 +936,13 @@ int main(void)
 	test_aux_samples_are_written_once_per_second();
 	test_gps_samples_are_written_in_order();
 	test_unknown_source_counts_as_failed();
+	test_format_gps_adds_utc_when_known();
+	test_format_button_produces_exact_json();
+	test_format_open_produces_exact_json();
+	test_new_log_file_is_private();
+	test_config_start_writes_open_marker_and_status();
+	test_rotation_keeps_limited_number_of_files();
+	test_config_start_rejects_bad_arguments();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);
