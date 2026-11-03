@@ -10,4 +10,6 @@
 - `config.txt`, `cmdline.txt`: `enable_uart=1`, `enable_rp1_uart=1` (лог прошивки й `getty` на GPIO14, `ttyAMA0`).
 - `post-image.sh`, `genimage.cfg.in`: копія стокових із Buildroot 2026.08 + `bcm2712d0.dtbo` з каталогу ядра (Pi 5 з чипом D0, наприклад 16 ГБ; без нього прошивка пише `bcm2712d0.dtbo not found`).
 - Консоль входу: `BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"`, 115200; повідомлення ядра на GPIO14 не видно (драйвер `pl011-axi`), вони йдуть на JST-роз'єм (`ttyAMA10`).
+- Wi-Fi: `wpa_supplicant.conf` (шаблон для розділу boot, кладе `post-image.sh`), `rootfs_overlay/etc/init.d/S41wifi`
+  (служба), `rootfs_overlay/usr/sbin/wifi` (команда для правки мереж на платі); тест `tests/check_wifi.sh`.
 - `dropbear` (SSH по Ethernet), демонстраційний пароль root у defconfig (ніде більше не використовується).

@@ -68,6 +68,15 @@
   Повідомлення ядра йдуть на роз'єм JST (`ttyAMA10`), на `DBG1` лише getty та вивід `S99motion_logger`.
 - Мережа: DHCP на `eth0`, SSH-сервер dropbear (користувач `root`, навчальний пароль задано в `configs/motion_logger_defconfig`;
   у продуктовому образі його прибрати).
+- Wi-Fi: мережі лежать на розділі boot (FAT) у `wpa_supplicant.conf`, тому SSID і пароль змінюються **без
+  перезбирання образу**. Два способи:
+  - на комп'ютері: вставити картку, у файлі `wpa_supplicant.conf` на розділі boot розкоментувати блок
+    `network={ ssid="..." psk="..." }`, перезавантажити плату;
+  - на платі (через UART чи Ethernet): `wifi add "Назва"` (спитає пароль, у файл піде ключ PSK, а не пароль),
+    `wifi list`, `wifi remove "Назва"`, `wifi status`. Зміни діють одразу.
+
+  Поки в файлі нема жодного блоку `network`, Wi-Fi не вмикається. Адреса по DHCP, ім'я хоста `motion-logger`.
+  Служба: `/etc/init.d/S41wifi {start|stop|restart|status}`. Перевірка без плати: `sh board/motion_logger/tests/check_wifi.sh`.
 - Автозапуск: `/etc/init.d/S99motion_logger {start|stop|restart|status}`, параметри в `/etc/default/motion_logger`.
 - Перевірка заліза в образі (потрібні `i2c_arm` і `spi` у `config.txt` та модулі з `/etc/modules-load.d/`):
 

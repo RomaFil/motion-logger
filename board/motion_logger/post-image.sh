@@ -14,6 +14,10 @@ GENIMAGE_TMP="${BUILD_DIR}/genimage.tmp"
 mkdir -p "${BINARIES_DIR}/rpi-firmware"
 cp "${BOARD_DIR}/config.txt" "${BOARD_DIR}/cmdline.txt" "${BINARIES_DIR}/rpi-firmware/"
 
+# Шаблон мереж Wi-Fi: на розділі boot, щоб SSID і пароль правились без перезбирання образу
+# (його читає /etc/init.d/S41wifi, правка на платі: команда wifi).
+cp "${BOARD_DIR}/wpa_supplicant.conf" "${BINARIES_DIR}/rpi-firmware/"
+
 # Pi 5 із чипом BCM2712 D0 (зокрема модель 16 ГБ): прошивка шукає /overlays/bcm2712d0.dtbo.
 # Оверлей збирається разом із ядром, але Buildroot його в образ не кладе, тому беремо з каталогу ядра.
 OVL_SRC=$(ls "${BUILD_DIR}"/linux-*/arch/arm/boot/dts/overlays/bcm2712d0.dtbo 2>/dev/null | head -n 1)

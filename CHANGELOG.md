@@ -3,6 +3,15 @@
 Фіксуємо те, що впливає на збірку образу чи поведінку на платі (вимога менторів Ajax: суттєві зміни збірки
 описувати окремо). Дрібні правки коду дивіться в `git log`.
 
+## 03.11.2026
+
+- **Образ (не збирався, на платі не перевірявся): Wi-Fi.** У `defconfig` прошивка CYW43455
+  (`brcmfmac-sdio-firmware-rpi-wifi`), `wireless-regdb`, `wpa_supplicant` з `wpa_cli` і `wpa_passphrase`, ім'я хоста
+  `motion-logger`. `post-image.sh` кладе шаблон `board/motion_logger/wpa_supplicant.conf` на розділ boot. Нова служба
+  `S41wifi` монтує boot у `/boot` лише для читання і, якщо в файлі є мережі, вантажить `brcmfmac`, запускає
+  `wpa_supplicant` і `udhcpc` на `wlan0`; нова команда `wifi add|remove|list|status` править файл на платі.
+  Після збірки перевірити: `ls /lib/firmware/brcm/brcmfmac43455*`, `wifi add <ssid>`, `wifi status`, `ip addr show wlan0`.
+
 ## 29.10.2026
 
 - **Образ (не збирався, на платі не перевірявся):** overlay `motion-logger-sensors.dtbo` (MPU6050 на `i2c1`

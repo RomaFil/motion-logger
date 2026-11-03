@@ -1,0 +1,180 @@
+#!/bin/sh
+# Мережі Wi-Fi без перезбирання образу. Список лежить на розділі boot (FAT) у /boot/wpa_supplicant.conf:
+# його можна правити й на комп'ютері через кард-рідер (тоді зміни діють після перезавантаження).
+#
+#   wifi add <ssid> [пароль]   додати мережу або змінити її пароль; без пароля спитає, не показуючи
+#   wifi remove <ssid>         прибрати мережу
+#   wifi list                  назви збережених мереж
+#   wifi status                до чого підключено зараз і яка адреса
+#
+# Пароль у файл іде не відкритим текстом, а ключем PSK від wpa_passphrase. Зміни застосовуються одразу
+# (wpa_cli reconfigure або старт служби S41wifi). Лише POSIX sh (BusyBox ash).
+set -u
+
+# Змінні WIFI_* лише для перевірки на комп'ютері (board/motion_logger/tests/check_wifi.sh).
+CONF=${WIFI_CONF:-/boot/wpa_supplicant.conf}
+BOOT_DIR=${WIFI_BOOT_DIR-/boot} # порожнє значення: нічого не монтувати
+SERVICE=${WIFI_SERVICE:-/etc/init.d/S41wifi}
+IFACE=wlan0
+BOOT_DEV=/dev/mmcblk0p1
+[ -r /etc/default/wifi ] && . /etc/default/wifi
+
+# Заголовок нового файлу: керувальний сокет для wpa_cli і країна (канали й потужність за правилами UA).
+HEADER='ctrl_interface=/var/run/wpa_supplicant
+country=UA'
+
+die() {
+	echo "wifi: $*" >&2
+	exit 1
+}
+
+usage() {
+	echo "usage: wifi add <ssid> [password] | remove <ssid> | list | status" >&2
+	exit 1
+}
+
+check_ssid() {
+	[ -n "$1" ] || die "empty SSID"
+	[ "${#1}" -le 32 ] || die "SSID longer than 32 characters"
+	case "$1" in
+	*'
+'*) die "SSID with a line break" ;;
+	esac
+}
+
+# Розділ boot у системі змонтовано лише для читання (S41wifi); на час запису перемонтовуємо.
+boot_rw() {
+	[ -z "$BOOT_DIR" ] && return 0
+	if ! grep -q " $BOOT_DIR vfat " /proc/mounts; then
+		mkdir -p "$BOOT_DIR"
+		mount -t vfat -o ro,nodev,nosuid,noexec,fmask=0177,dmask=0077 "$BOOT_DEV" "$BOOT_DIR" ||
+			die "cannot mount $BOOT_DEV"
+	fi
+	mount -o remount,rw "$BOOT_DIR" || die "cannot remount $BOOT_DIR read-write"
+}
+
+boot_ro() {
+	sync
+	[ -z "$BOOT_DIR" ] && return 0
+	mount -o remount,ro "$BOOT_DIR"
+}
+
+# Друкує файл без блоків network={...}, у яких ssid дорівнює $1. CR із кінця рядків прибирається:
+# файл могли правити в Блокноті Windows.
+without_network() {
+	[ -f "$CONF" ] || {
+		printf '%s\n' "$HEADER"
+		return 0
+	}
+	WIFI_SSID=$1 awk '
+		BEGIN { want = "ssid=\"" ENVIRON["WIFI_SSID"] "\"" }
+		{ sub(/\r$/, "") }
+		inblock {
+			block = block $0 "\n"
+			t = $0
+			gsub(/^[ \t]+|[ \t]+$/, "", t)
+			if (t == want) drop = 1
+			if (t == "}") {
+				if (!drop) printf "%s", block
+				inblock = 0
+			}
+			next
+		}
+		/^[ \t]*network[ \t]*=[ \t]*\{/ { inblock = 1; drop = 0; block = $0 "\n"; next }
+		{ print }
+		END { if (inblock && !drop) printf "%s", block }
+	' "$CONF"
+}
+
+# Записує stdin у файл налаштувань: спершу поруч у тимчасовий, потім перейменування, щоб обірване
+# живлення не лишило половину файлу.
+save_conf() {
+	tmp="$CONF.new"
+	cat >"$tmp" || {
+		rm -f "$tmp"
+		return 1
+	}
+	mv "$tmp" "$CONF"
+}
+
+# Застосувати зміни: якщо wpa_supplicant працює, він перечитає файл; інакше стартуємо службу.
+apply() {
+	if wpa_cli -i "$IFACE" ping >/dev/null 2>&1; then
+		wpa_cli -i "$IFACE" reconfigure >/dev/null && echo "wifi: reloaded"
+	else
+		"$SERVICE" start
+	fi
+}
+
+cmd_add() {
+	[ $# -ge 1 ] && [ $# -le 2 ] || usage
+	ssid=$1
+	check_ssid "$ssid"
+	if [ $# -eq 2 ]; then
+		pass=$2
+	else
+		printf 'password for %s: ' "$ssid" >&2
+		stty -echo 2>/dev/null
+		IFS= read -r pass
+		stty echo 2>/dev/null
+		echo >&2
+	fi
+
+	# Пароль іде через stdin, а не аргументом: так його не видно в ps. Рядок #psk="..." з відкритим
+	# паролем, який друкує wpa_passphrase, у файл не пишемо. Помилки (довжина 8..63) wpa_passphrase
+	# друкує в stdout, тому віддаємо їх користувачу.
+	if ! block=$(printf '%s\n' "$pass" | wpa_passphrase "$ssid" 2>/dev/null); then
+		die "${block:-wpa_passphrase failed}"
+	fi
+	block=$(printf '%s\n' "$block" | grep -v '#psk=')
+
+	boot_rw
+	if ! { without_network "$ssid" && printf '%s\n' "$block"; } | save_conf; then
+		boot_ro
+		die "cannot write $CONF"
+	fi
+	boot_ro
+	echo "wifi: saved $ssid"
+	apply
+}
+
+cmd_remove() {
+	[ $# -eq 1 ] || usage
+	[ -f "$CONF" ] || die "no $CONF"
+	if ! cmd_list | grep -qxF -e "$1"; then
+		die "no network $1"
+	fi
+
+	boot_rw
+	if ! without_network "$1" | save_conf; then
+		boot_ro
+		die "cannot write $CONF"
+	fi
+	boot_ro
+	echo "wifi: removed $1"
+	apply
+}
+
+cmd_list() {
+	[ -f "$CONF" ] || return 0
+	awk '
+		{ sub(/\r$/, "") }
+		/^[ \t]*ssid[ \t]*=/ {
+			sub(/^[ \t]*ssid[ \t]*=[ \t]*/, "")
+			sub(/[ \t]+$/, "")
+			if (substr($0, 1, 1) == "\"") $0 = substr($0, 2, length($0) - 2)
+			print
+		}
+	' "$CONF"
+}
+
+[ $# -ge 1 ] || usage
+command=$1
+shift
+case "$command" in
+add) cmd_add "$@" ;;
+remove) cmd_remove "$@" ;;
+list) cmd_list ;;
+status) "$SERVICE" status ;;
+*) usage ;;
+esac

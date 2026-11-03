@@ -1,7 +1,8 @@
 # Лише LF у скриптах і Makefile: CRLF ламає shebang і Make (презентація 05 Ajax)
 * text=auto
 *.sh text eol=lf
-S99* text eol=lf
+S[0-9][0-9]* text eol=lf
+board/motion_logger/rootfs_overlay/usr/sbin/* text eol=lf
 Makefile text eol=lf
 *.mk text eol=lf
 *.c text eol=lf
