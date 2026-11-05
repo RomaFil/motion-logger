@@ -40,6 +40,15 @@ int motion_report_init(struct motion_report *report, size_t window_size, double 
 	return 0;
 }
 
+int motion_report_set_release(struct motion_report *report, double release_g)
+{
+	if (report == NULL) {
+		return -EINVAL;
+	}
+
+	return motion_filter_set_release(&report->filter, release_g);
+}
+
 int motion_report_add_sample(struct motion_report *report, const struct accel_sample *sample,
 			     struct motion_report_update *update)
 {

@@ -26,6 +26,29 @@
     cat /sys/bus/iio/devices/iio:device0/in_accel_x_raw   # число, що змінюється при нахилі плати
     dmesg | grep -i -e mpu6050 -e adxl345         # драйвери підхопили вузли
 
+## Перевірено на платі (образ `da1be05`, 02.11.2026)
+
+| Що | Команда | Результат |
+|---|---|---|
+| Прошивка застосувала overlay | `find /sys/firmware/devicetree/base -name "imu@68" -o -name "accelerometer@0"` | `…/i2c@74000/imu@68` і `…/spi@50000/accelerometer@0` є в живому дереві |
+| Драйвери підхопили вузли | `readlink /sys/bus/i2c/devices/1-0068/driver`, `readlink /sys/bus/spi/devices/spi0.0/driver` | `inv-mpu6050-i2c` і `adxl345_spi` |
+| Модулі ядра | `lsmod` | `inv_mpu6050_i2c`, `adxl345_spi`, `i2c_dev`, `spidev`, `spi_dw_mmio`, `i2c_designware_platform` |
+| Пристрої IIO | `cat /sys/bus/iio/devices/iio:device*/name` | `iio:device0` = `mpu6050`, `iio:device1` = `adxl345` |
+| I2C | `i2cdetect -y 1` | `0x68` = `UU` (зайнято драйвером ядра, це норма), `0x77` (барометр) видно, `0x1e` (магнітометр) без bypass не видно |
+| `spidev0` вимкнено | `ls /dev/spidev*` | є `spidev0.1`, `spidev0.0` нема: фрагмент 2 працює, CE0 належить драйверу ADXL345 |
+| Частота | `cat iio:device0/sampling_frequency`, `cat iio:device1/in_accel_sampling_frequency` | `100` і `100.000000000` |
+
+Атрибут частоти в двох датчиків називається по-різному: `sampling_frequency` (MPU6050, його виставляє
+`S99motion_logger` зі `MOTION_LOGGER_IIO_RATES`) і `in_accel_sampling_frequency` (ADXL345).
+
+Після завантаження `dmesg` показує для MPU6050 три повідомлення: `mounting matrix not found: using identity`,
+`supply vdd not found` і `supply vddio not found, using dummy regulator`. Overlay не описує матрицю орієнтації датчика
+та регулятори живлення, тому драйвер бере одиничну матрицю й заглушки; на роботу це не впливає (датчик віддає
+відліки), але для коректних осей на іншій платі матрицю треба описати.
+
 ## Що ще не перевірено
 
-Образ із цим overlay ще не завантажувався на платі. Особливо потребують перевірки: чи застосовує прошивка Pi 5 наш `.dtbo`, чи збігаються імена модулів у `modules-load.d` з реальними `.ko`, і чи MPU6050 за адресою `0x68` не показується як `UU` через інший драйвер (це нормально, якщо його зайняв драйвер ядра).
+- I2C лишається на 100 кГц: 400 кГц не пробували.
+- Лінія INT1 ADXL345 не підключена, тож режим із перериваннями не перевірявся.
+- Матриця орієнтації MPU6050 не задана (одинична), осі збігаються з осями чипа, а не корпусу.
+- Перевірка зроблена на одній платі й одному зібраному образі; на іншому ядрі імена модулів у `modules-load.d` треба звірити з реальними `.ko`.

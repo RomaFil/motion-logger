@@ -3,32 +3,64 @@
 Фіксуємо те, що впливає на збірку образу чи поведінку на платі (вимога менторів Ajax: суттєві зміни збірки
 описувати окремо). Дрібні правки коду дивіться в `git log`.
 
-## 03.11.2026
+## 05.11.2026
 
-- **Образ (не збирався, на платі не перевірявся): надійність і доступ.**
-  - Картка має третій розділ `data` (ext4, 1 ГБ, `genimage.cfg.in`); `S12mounts` монтує його в `/data`, а boot у
-    `/boot` лише для читання. **Розмітка змінилась: картку треба записати заново.**
-  - `S99motion_logger` запускає програму під наглядачем: після аварії перезапуск через 2…60 с, `status` показує обидва
-    PID; сирота після `kill -9` наглядача прибирається на наступному `start`.
-  - Watchdog: `BR2_PACKAGE_BUSYBOX_WATCHDOG` (`S15watchdog`, `/dev/watchdog` BCM2712).
-  - NTP: `busybox.fragment` вмикає `ntpd`, служба `S49ntp` (`/etc/default/ntp`).
-  - SSH-ключі: `authorized_keys` на розділі boot копіюється в `/root/.ssh` і вимикає вхід за паролем
-    (`/etc/default/dropbear`).
-  - `/etc/default/motion_logger`: готовий рядок для всіх датчиків, LED і логу на `/data` з ротацією.
-  - Тести: `check_init_script.sh` (наглядач), новий `check_overlay.sh`.
-  Після збірки перевірити: `mount | grep -E '/boot|/data'`, `S99motion_logger status`, `kill -9` програми й
-  повторний `status` (перезапуск), `ls /dev/watchdog`, `date` після підключення мережі.
-- **Застосунок:** збій шини датчика пропускає відлік (`read errors` у підсумку), зупинка лише після 500 збоїв підряд;
-  потік GPS не завершується від `read() == 0` на послідовному порту; `fdatasync` раз на 5 с; лог `0600`;
-  ротація `--log-max-mb` / `--log-keep`; рядок `"src":"log","event":"open"` з `boot_id`; поле `utc` у рядках `gps`;
-  `--iio mpu6050` (за іменем); `--gpio /dev/gpiochip0`: світлодіоди стану й кнопки (`"src":"button"`).
-  Формат старих рядків не змінився, лише в `gps` може з'явитися поле `utc` у кінці.
-- **Образ (не збирався, на платі не перевірявся): Wi-Fi.** У `defconfig` прошивка CYW43455
-  (`brcmfmac-sdio-firmware-rpi-wifi`), `wireless-regdb`, `wpa_supplicant` з `wpa_cli` і `wpa_passphrase`, ім'я хоста
-  `motion-logger`. `post-image.sh` кладе шаблон `board/motion_logger/wpa_supplicant.conf` на розділ boot. Нова служба
-  `S41wifi` монтує boot у `/boot` лише для читання і, якщо в файлі є мережі, вантажить `brcmfmac`, запускає
-  `wpa_supplicant` і `udhcpc` на `wlan0`; нова команда `wifi add|remove|list|status` править файл на платі.
-  Після збірки перевірити: `ls /lib/firmware/brcm/brcmfmac43455*`, `wifi add <ssid>`, `wifi status`, `ip addr show wlan0`.
+- **Образ + застосунок (гілка `claude/zealous-noether-yfvwss`: злиття `feature/uboot-wifi` і `feature/telemetry`;
+  образ не збирався, на платі не перевірявся):**
+  - **Розмітка картки змінилась:** третій розділ `data` (ext4, 1 ГБ, `genimage.cfg.in`), `S12mounts` монтує його в
+    `/data` і `/boot` (на запис із `sync`, як `S41wifi`). Картку треба записати заново. Лог автозапуску тепер
+    `/data/motion.jsonl` з ротацією `--log-max-mb 50 --log-keep 10` (раніше `/var/log`, tmpfs).
+  - `S99motion_logger` запускає програму під наглядачем: після аварії перезапуск через 2…60 с; `@ім'я` датчиків і
+    частота MPU6050 як раніше.
+  - Watchdog (`BR2_PACKAGE_BUSYBOX_WATCHDOG`, `S15watchdog`), NTP (`busybox.fragment` з `CONFIG_NTPD`, `S49ntp`), ім'я
+    хоста `motion-logger`, `authorized_keys` з розділу boot вимикає вхід за паролем (`/etc/default/dropbear`).
+  - Застосунок: збій шини датчика пропускає відлік (`read errors`), зупинка лише після 500 збоїв підряд; потік GPS не
+    завершується від `read() == 0` на послідовному порту; `fdatasync` раз на 5 с; лог `0600`; рядок
+    `"src":"log","event":"open"` з `boot_id`; `--iio mpu6050` за іменем.
+  Після збірки перевірити: `mount | grep -E '/boot|/data'`, `head -n 1 /data/motion.jsonl` (рядок `log`),
+  `S99motion_logger status`, `kill -9` програми й повторний `status` (перезапуск), `ls /dev/watchdog`, `date` після
+  підключення Wi-Fi.
+
+## 01.11.2026
+
+- **Застосунок + образ (гілка `feature/wifi-ui`; кнопка, пауза і етапи 1 і 2 перевірені на платі 02.11.2026, у образ не збиралось):** об'єднано крок 5.4 (кнопка,
+  пауза запису, `feature/ui-gpio`) із світлодіодами етапів руху. Опція `--ui-gpio <чіп>` (замість `--stage-leds`):
+  кнопка GPIO17 ставить запис на паузу й знімає з неї, світлодіод 1 (GPIO22) до руху, 2 (GPIO6) під час руху, 3 (GPIO27)
+  після зупинки, на паузі горять всі три; після паузи запис і фільтр руху починаються заново. `--ui-no-button` лише
+  світлодіоди, `--ui-button-active-low` кнопка дає 0 при натисканні. Автозапуск стартує з кнопкою (`--ui-gpio gpiochip0`).
+- **Образ m6 (крок 5.6, збірка з коміту `c9d178a`, тег `m6`; перевірено на платі з чистої картки 02.11.2026):**
+  `sdcard-2026-11-01-m6-feature-c9d178a.img`, SHA-256
+  `d562e15a671e6b751b868f95771f6ab7a3fe4d7939d28ca4094ebee329c47c18`. Після вмикання без жодних дій плата за ~40 с
+  в мережі Wi-Fi, `motion_logger` стартує сам (init, PID 280, через 13,6 с після старту ядра), датчики знайдено за
+  ім'ям, `mpu6050` на 100 Гц, лог росте (accel, accel2, gps), `S99motion_logger status` повертає 0. Мережі Wi-Fi
+  беруться з `wifi.secret` на машині збірки, у git їх нема.
+- **Образ (крок 5.5, перевірено на платі зі старим образом і підміненими файлами: після вимкнення-ввімкнення
+  живлення застосунок стартує сам за ~16 с, лог росте):** `/etc/default/motion_logger` тепер має робочі параметри
+  (`--iio @mpu6050 --iio-rate 100 --iio-aux @adxl345 --gps /dev/ttyAMA2 --log /var/log/motion.jsonl
+  --stage-leds gpiochip0`); `S99motion_logger` замінює `@ім'я` на каталог `iio:deviceN` за іменем датчика
+  і виставляє `sampling_frequency` MPU6050 на 100 Гц (`MOTION_LOGGER_IIO_RATES`). Лог лежить на tmpfs.
+  `config.txt`: `gpio=6=op,dl` (середній світлодіод не тліє від підтяжки).
+- **Застосунок:** фільтр руху з гістерезисом: поріг входу 0,03 g, поріг виходу 0,015 g (було один поріг 0,02 g).
+  На записі «стою, іду, стою» (22:47) зникла хибна пара подій біля 50-ї секунди, ходьба 20–40 с знайдена як і раніше;
+  на записі 01.11 лишився один `MOVE START` (59,62 с замість 59,57 с). `analyze_recording` отримав ключ `-r`.
+- **Застосунок:** опція `--dump-raw <файл>` пише сирі відліки основного акселерометра в CSV (формат `accel_csv`),
+  щоб звірити події справжнього запису з `analyze_recording` (крок 5.3 на платі).
+- **Застосунок + образ (не збирався, на платі не перевірявся):** опція `--stage-leds <чіп>` показує етап руху трьома
+  світлодіодами (до руху, рух, після зупинки; GPIO22, GPIO6, GPIO27). Пакет `motion_logger` збирається з `GPIOD=1`
+  і залежить від `libgpiod` (вона вже в `defconfig`, нових пакетів немає).
+- **Образ (не збирався, на платі не перевірявся; гілка `feature/wifi`):** Wi-Fi замість Ethernet. У `defconfig`:
+  `linux-firmware` (`BRCM_BCM43XXX`), `wireless-regdb`, `wpa_supplicant` (nl80211, `wpa_cli`). Новий скрипт
+  `S41wifi` читає мережі з `/boot/wifi.txt` (FAT-розділ картки, у git його немає), генерує конфіг у `/run` і
+  запускає `wpa_supplicant` та `udhcpc` на `wlan0`; `brcmfmac` додано в `modules-load.d`; NVRAM Pi 5 це симлінк
+  на файл Pi 4. `post-image.sh` кладе `~/workspace/wifi.secret` у boot-розділ образу. Подробиці: `docs/wifi.md`.
+  Після першої збірки: `wlan0` має адресу, SSH по Wi-Fi працює без кабелю.
+  `S41wifi` також пише знімки стану Wi-Fi у `/boot/wifi-debug.log` (читається з Windows без консолі).
+  Далі: країна більше не задається за замовчуванням (у логу з `country=UA` регдомен змінювався постійно), `brcmfmac roamoff=1 feature_disable=0x82000` (без останнього wpa_supplicant 2.12 не дочікувався `port authorized` від brcmfmac, `Authentication timed out`, цикл розривів). У `defconfig` пакет `iw`, `S41wifi` вимикає `power_save` на `wlan0` (при увімкненому плата мала оренду DHCP, але не відповідала з ПК).
+
+## 29.10.2026 (гілка feature/ui-gpio, ще не злита в main)
+
+- **Застосунок:** кнопка і RGB-світлодіод (`--ui-gpio`, крок 5.4): пауза запису, колір за станом; `log_writer_set_paused()` і `log_writer_is_moving()`; драйвер `drivers/gpiod_ui` на libgpiod 1.x, збирається з `GPIOD=1`.
+- **Образ:** пакет `motion_logger` залежить від `libgpiod` і збирається з `GPIOD=1`. Не збиралось у Buildroot.
 
 ## 29.10.2026
 

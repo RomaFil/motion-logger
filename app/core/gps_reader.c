@@ -199,8 +199,7 @@ static void store_gps_sample(const struct nmea_fix *fix, int satellites, struct 
 	struct sample item = {.source = SAMPLE_SOURCE_GPS,
 			      .time_ms = monotonic_ms(),
 			      .gps_fix = fix->valid && fix->has_position,
-			      .satellites = satellites,
-			      .gps_utc_s = nmea_utc_seconds(fix)};
+			      .satellites = satellites};
 
 	if (item.gps_fix) {
 		item.latitude_deg = fix->latitude_degrees;

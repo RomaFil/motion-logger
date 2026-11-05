@@ -1,7 +1,7 @@
 #!/bin/sh
 # Розділи картки, яких нема в /etc/fstab Buildroot:
-#   /boot  перший розділ (FAT): config.txt, wpa_supplicant.conf, authorized_keys. Лише для читання;
-#          команда wifi на мить перемонтовує його на запис.
+#   /boot  перший розділ (FAT): config.txt, wifi.txt, authorized_keys. На запис і з sync, як його
+#          монтує S41wifi: wifi.txt правиться на платі, а S41wifi пише туди wifi-debug.log.
 #   /data  третій розділ (ext4, мітка data): лог motion_logger. Окремо від кореня, щоб лог, що
 #          росте, не заповнив систему, а оновлення образу не стирало записи (якщо розділ лишити).
 # Якщо третього розділу нема (стара картка), /data просто каталог на корені, і про це пишемо.
@@ -20,7 +20,7 @@ is_mounted() {
 start() {
 	mkdir -p "$BOOT_DIR" "$DATA_DIR"
 	if ! is_mounted "$BOOT_DIR"; then
-		mount -t vfat -o ro,nodev,nosuid,noexec,fmask=0177,dmask=0077 "$BOOT_DEV" "$BOOT_DIR" ||
+		mount -t vfat -o rw,noatime,sync "$BOOT_DEV" "$BOOT_DIR" ||
 			echo "mounts: cannot mount $BOOT_DEV on $BOOT_DIR" >&2
 	fi
 	if is_mounted "$DATA_DIR"; then

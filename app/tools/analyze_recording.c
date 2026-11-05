@@ -3,10 +3,12 @@
  * @brief Прогоняє запис акселерометра (CSV) і GPS (NMEA) через модулі проєкту й друкує звіт.
  *
  * Використання:
- *   analyze_recording [-w вікно] [-t поріг_g] [-c підтвердження] accel.csv [gps.nmea]
+ *   analyze_recording [-w вікно] [-t поріг_g] [-r поріг_виходу_g] [-c підтвердження] accel.csv
+ *                     [gps.nmea]
  *
- *   -w  розмір вікна фільтра руху, відліків (за замовчуванням 10)
- *   -t  поріг руху в g (за замовчуванням 0.05; це припущення, підбирається за записом)
+ *   -w  розмір вікна фільтра руху, відліків (за замовчуванням 50)
+ *   -t  поріг входу в рух в g (за замовчуванням 0.03, див. core/motion_defaults.h)
+ *   -r  поріг виходу з руху в g, не вище за -t (за замовчуванням 0.015; без -r не вище за -t)
  *   -c  скільки відповідей фільтра підряд підтверджують зміну стану (за замовчуванням 50)
  *
  * Звіт: таблиця "секунда, рух так/ні, середнє відхилення в g", список подій MOVE START /
@@ -29,6 +31,7 @@
 
 #define DEFAULT_WINDOW MOTION_DEFAULT_WINDOW
 #define DEFAULT_THRESHOLD_G MOTION_DEFAULT_THRESHOLD_G
+#define DEFAULT_RELEASE_G MOTION_DEFAULT_RELEASE_G
 #define DEFAULT_CONFIRM MOTION_DEFAULT_CONFIRM
 #define NMEA_LINE_SIZE 128
 #define MSEC_PER_SEC 1000
@@ -37,6 +40,7 @@
 struct settings {
 	size_t window;
 	double threshold_g;
+	double release_g;
 	size_t confirm;
 	const char *accel_path;
 	const char *gps_path; /* NULL, якщо GPS-файл не задано */
@@ -104,15 +108,17 @@ int main(int argc, char **argv)
 
 static int parse_arguments(int argc, char **argv, struct settings *settings)
 {
+	bool release_given = false;
 	int option;
 
 	settings->window = DEFAULT_WINDOW;
 	settings->threshold_g = DEFAULT_THRESHOLD_G;
+	settings->release_g = DEFAULT_RELEASE_G;
 	settings->confirm = DEFAULT_CONFIRM;
 	settings->accel_path = NULL;
 	settings->gps_path = NULL;
 
-	while ((option = getopt(argc, argv, "w:t:c:")) != -1) {
+	while ((option = getopt(argc, argv, "w:t:r:c:")) != -1) {
 		int error = -EINVAL;
 
 		switch (option) {
@@ -121,6 +127,10 @@ static int parse_arguments(int argc, char **argv, struct settings *settings)
 			break;
 		case 't':
 			error = parse_double_option(optarg, &settings->threshold_g);
+			break;
+		case 'r':
+			error = parse_double_option(optarg, &settings->release_g);
+			release_given = true;
 			break;
 		case 'c':
 			error = parse_size_option(optarg, &settings->confirm);
@@ -133,6 +143,10 @@ static int parse_arguments(int argc, char **argv, struct settings *settings)
 		}
 	}
 
+	if (!release_given && settings->release_g > settings->threshold_g) {
+		settings->release_g =
+		    settings->threshold_g; /* -t нижче порога виходу за замовчуванням */
+	}
 	if (optind >= argc || argc - optind > 2) {
 		return -EINVAL;
 	}
@@ -189,9 +203,13 @@ static int analyze_accel(FILE *file, const struct settings *settings)
 	if (error < 0) {
 		return error;
 	}
+	error = motion_report_set_release(&report, settings->release_g);
+	if (error < 0) {
+		return error;
+	}
 
-	printf("# window=%zu threshold_g=%.3f confirm=%zu\n", settings->window,
-	       settings->threshold_g, settings->confirm);
+	printf("# window=%zu threshold_g=%.3f release_g=%.3f confirm=%zu\n", settings->window,
+	       settings->threshold_g, settings->release_g, settings->confirm);
 	printf("second moving samples avg_dev_g\n");
 
 	/* Події не друкуємо посеред таблиці: збираємо й виводимо після неї. */
@@ -338,6 +356,7 @@ static int analyze_gps(FILE *file)
 static void print_usage(const char *program)
 {
 	fprintf(stderr,
-		"usage: %s [-w window] [-t threshold_g] [-c confirm] accel.csv [gps.nmea]\n",
+		"usage: %s [-w window] [-t threshold_g] [-r release_g] [-c confirm] accel.csv "
+		"[gps.nmea]\n",
 		program);
 }

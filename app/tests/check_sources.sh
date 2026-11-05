@@ -16,6 +16,10 @@ DATA=$2
 RUN_SECONDS=3
 # Рядків RMC у файлі NMEA: стільки ж рядків gps очікуємо в лозі.
 RMC_LINES=$(grep -c 'RMC' "$DATA/gps_sample.nmea")
+# З них зі статусом A (є позиція) і V (нема): стільки ж рядків fix:true і fix:false очікуємо в лозі.
+# Числа беремо з самого файлу, а не з коду: файл можна замінити іншим записом (крок 1.6).
+RMC_FIX_LINES=$(grep -c '^\$G[A-Z]RMC,[^,]*,A,' "$DATA/gps_sample.nmea" || true)
+RMC_NO_FIX_LINES=$(grep -c '^\$G[A-Z]RMC,[^,]*,V,' "$DATA/gps_sample.nmea" || true)
 
 WORK=$(mktemp -d /tmp/check_sources_XXXXXX)
 PID=
@@ -71,22 +75,22 @@ count_lines() {
 ACCEL_ROWS=$(count_lines '"src":"accel","second"')
 AUX_LINES=$(count_lines '"src":"accel2"')
 GPS_LINES=$(count_lines '"src":"gps"')
-GPS_FIX_LINES=$(count_lines '"src":"gps","fix":true,"lat":50.450100,"lon":30.523400')
+GPS_FIX_LINES=$(count_lines '"src":"gps","fix":true,"lat":')
 GPS_NO_FIX_LINES=$(count_lines '"src":"gps","fix":false')
 
 [ "$ACCEL_ROWS" -ge 1 ] || fail "no per-second accel rows in the log"
 [ "$AUX_LINES" -ge 1 ] || fail "no accel2 lines in the log"
 [ "$GPS_LINES" -eq "$RMC_LINES" ] || fail "expected $RMC_LINES gps lines, got $GPS_LINES"
-[ "$GPS_FIX_LINES" -ge 1 ] || fail "no gps line with the fix position 50.450100,30.523400"
-[ "$GPS_NO_FIX_LINES" -ge 1 ] || fail "no gps line without a fix"
+[ "$GPS_FIX_LINES" -eq "$RMC_FIX_LINES" ] ||
+	fail "expected $RMC_FIX_LINES gps lines with a fix position, got $GPS_FIX_LINES"
+[ "$GPS_NO_FIX_LINES" -eq "$RMC_NO_FIX_LINES" ] ||
+	fail "expected $RMC_NO_FIX_LINES gps lines without a fix, got $GPS_NO_FIX_LINES"
 
 # Один акселерометр лежить нерухомо на столі: жодної події руху.
 [ "$(count_lines '"event":"MOVE_')" -eq 0 ] || fail "motion events for a board lying still"
 
-# Перший рядок: відкриття файлу; у рядках GPS є час UTC із супутників.
+# Перший рядок: відкриття файлу.
 head -n 1 "$LOG" | grep -q '"src":"log","event":"open"' || fail "no open line at the top of the log"
-[ "$(count_lines '"src":"gps".*"utc":"20[0-9][0-9]-[01][0-9]-[0-3][0-9]T')" -ge 1 ] ||
-	fail "no gps line with the utc time"
 
 # Додатковий акселерометр: не більше рядка на секунду і значення z = 1 g.
 [ "$AUX_LINES" -le $((RUN_SECONDS + 1)) ] || fail "accel2 is written more than once per second"

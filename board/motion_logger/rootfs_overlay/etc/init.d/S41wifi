@@ -1,118 +1,186 @@
 #!/bin/sh
-# Wi-Fi (wlan0) з мережами з розділу boot: /boot/wpa_supplicant.conf. Розділ boot це FAT, тому файл
-# правиться на будь-якому комп'ютері через кард-рідер або на платі командою wifi; образ для цього
-# перезбирати не треба. Якщо в файлі нема жодного блоку network={...}, Wi-Fi не вмикається зовсім
-# (модуль brcmfmac не вантажиться, радіо мовчить).
-# Контракт як у S99motion_logger: start і stop ідемпотентні, status повертає 3, якщо служба не працює.
-# Лише POSIX sh (BusyBox ash). Стоїть після S40network (eth0) і до S50dropbear.
+# Wi-Fi на wlan0: wpa_supplicant + DHCP (BusyBox init викликає S* скрипти з аргументом start / stop).
+# Мережі й паролі НЕ в образі і НЕ в git: їх читаємо з /boot/wifi.txt (FAT-розділ microSD, його видно з
+# Windows). Змінити мережу = відредагувати цей файл на картці (або `vi /boot/wifi.txt` на платі) і
+# виконати `/etc/init.d/S41wifi restart`. Формат файлу: board/motion_logger/wifi.txt.example.
+# Пишемо на POSIX sh: на платі це BusyBox ash.
+NAME=wifi
 IFACE=wlan0
-# Розділ boot: перший розділ картки (root=/dev/mmcblk0p2 у cmdline.txt)
 BOOT_DEV=/dev/mmcblk0p1
 BOOT_DIR=/boot
-CONF=$BOOT_DIR/wpa_supplicant.conf
-WPA_PIDFILE=/var/run/wpa_supplicant.$IFACE.pid
-DHCP_PIDFILE=/var/run/udhcpc.$IFACE.pid
-# Скільки секунд чекати появи wlan0 після modprobe (драйвер ще вантажить прошивку чипа).
-IFACE_TIMEOUT=10
-STOP_TIMEOUT=5
+CONF_SRC=$BOOT_DIR/wifi.txt
+# Робочий конфіг wpa_supplicant лежить у tmpfs (/run): пароль не потрапляє у файлову систему образу.
+CONF=/run/wpa_supplicant.conf
+WPA_PID=/run/wpa_supplicant.pid
+WPA_LOG=/run/wpa_supplicant.log
+DHCP_PID=/run/udhcpc.$IFACE.pid
+# Скільки секунд чекати появи wlan0 після завантаження модуля brcmfmac (прошивка вантажиться ~2 с).
+IFACE_TIMEOUT=20
+HOSTNAME_DHCP=motion-logger
+# Діагностика без консолі: через DEBUG_DELAYS секунд після старту пишемо стан Wi-Fi у /boot/wifi-debug.log
+# (файл видно з Windows, коли картку вставлено в ПК). Вимкнути: DEBUG=0 у wifi.txt.
+DEBUG_LOG=$BOOT_DIR/wifi-debug.log
+DEBUG_DELAYS="25 90 200"
 
-# Перевизначення змінних вище (наприклад, інший BOOT_DEV) без правки скрипта.
-[ -r /etc/default/wifi ] && . /etc/default/wifi
-
-is_running() {
-	[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+# Значення ключа з wifi.txt (перший збіг, без CR від Windows-редактора).
+key() {
+	sed -n "s/^$1=//p" "$CONF_SRC" 2>/dev/null | head -n 1 | tr -d '\r'
 }
 
-# Розділ boot монтується лише для читання: на запис його на мить перемонтовує команда wifi.
-# fmask/dmask: паролі в файлі читає лише root.
 mount_boot() {
-	grep -q " $BOOT_DIR vfat " /proc/mounts && return 0
+	mountpoint -q "$BOOT_DIR" && return 0
 	mkdir -p "$BOOT_DIR"
-	mount -t vfat -o ro,nodev,nosuid,noexec,fmask=0177,dmask=0077 "$BOOT_DEV" "$BOOT_DIR"
+	# sync: файл правиться на платі вручну, не хочемо втратити зміну при вимкненні живлення.
+	mount -t vfat -o rw,noatime,sync "$BOOT_DEV" "$BOOT_DIR"
 }
 
-has_networks() {
-	[ -r "$CONF" ] && grep -q '^[[:space:]]*network[[:space:]]*=' "$CONF"
+# wifi.txt -> /run/wpa_supplicant.conf. Мереж до чотирьох: SSID, SSID2, SSID3, SSID4 (+ PSK, PSK2, ...);
+# wpa_supplicant сам обирає ту, що в ефірі. Порожній PSK = відкрита мережа.
+make_conf() {
+	country=$(key COUNTRY)
+	umask 077
+	{
+		echo "ctrl_interface=/run/wpa_supplicant"
+		# Країну задаємо лише явним COUNTRY= у wifi.txt. 01.11.2026 з country=UA регдомен змінювався знову й знову
+		# (REG_CHANGE кожні ~13 с, brcmfmac -52 на каналах 5 ГГц), і з'єднання рвалося.
+		[ -n "$country" ] && echo "country=$country"
+		for n in "" 2 3 4; do
+			ssid=$(key "SSID$n")
+			[ -n "$ssid" ] || continue
+			psk=$(key "PSK$n")
+			echo "network={"
+			echo "	ssid=\"$ssid\""
+			echo "	scan_ssid=1"
+			if [ -n "$psk" ]; then
+				echo "	psk=\"$psk\""
+			else
+				echo "	key_mgmt=NONE"
+			fi
+			echo "}"
+		done
+	} >"$CONF"
+	grep -q '^network=' "$CONF"
 }
 
-wait_iface() {
-	waited=0
-	while [ ! -e "/sys/class/net/$IFACE" ]; do
-		[ "$waited" -ge "$IFACE_TIMEOUT" ] && return 1
-		sleep 1
-		waited=$((waited + 1))
+# Один знімок стану для wifi-debug.log; викликається з фонового підпроцесу.
+debug_snapshot() {
+	echo "=== $(date) | uptime: $(cut -d' ' -f1 /proc/uptime) s | $1"
+	echo "--- net:"; ls /sys/class/net
+	echo "--- wlan0 mac: $(cat /sys/class/net/$IFACE/address 2>/dev/null)"
+	echo "--- lsmod (net/wifi):"; lsmod | grep -E 'brcm|cfg80211|rfkill|mmc|sdhci'
+	echo "--- dmesg (wifi):"; dmesg | grep -iE 'brcm|wlan|mmc[0-9]|sdio|firmware|cfg80211|regulatory|wifi' | tail -n 40
+	echo "--- dmesg (tail):"; dmesg | grep -v 'set_channel' | tail -n 15
+	echo "--- processes (all):"; ps
+	echo "--- binaries:"; ls -l /usr/sbin/wpa_supplicant /usr/sbin/wpa_cli 2>&1; wpa_supplicant -v 2>&1 | head -n 2
+	echo "--- /run:"; ls -l /run /run/wpa_supplicant 2>&1
+	echo "--- wpa conf (psk hidden):"; sed 's/psk=.*/psk=<hidden>/' "$CONF" 2>&1
+	echo "--- wpa events (all):"; grep -E 'CTRL-EVENT|State: |handshake|EAPOL|Deauth|Disassoc|reason=|Authentication|status_code|SME:|Trying to|Connection to|disabled|Associated with' "$WPA_LOG" 2>&1 | grep -v 'chanspec' | tail -n 80
+	echo "--- wpa_supplicant.log (tail 25):"; tail -n 25 "$WPA_LOG" 2>&1
+	echo "--- ip addr:"; ip addr show "$IFACE" 2>&1
+	echo "--- wpa_cli status:"; wpa_cli -i "$IFACE" status 2>&1
+	echo "--- regdomain:"; iw reg get 2>&1 | head -n 6
+	echo "--- brcmfmac roamoff: $(cat /sys/module/brcmfmac/parameters/roamoff 2>&1)"
+	echo "--- power (dmesg):"; dmesg | grep -iE 'volt|throttl|brownout' | tail -n 5
+	echo "--- iw power_save / link:"; iw dev "$IFACE" get power_save 2>&1; iw dev "$IFACE" link 2>&1
+	echo "--- wpa_cli signal_poll:"; wpa_cli -i "$IFACE" signal_poll 2>&1
+	echo "--- wpa_cli scan_results:"; wpa_cli -i "$IFACE" scan_results 2>&1 | head -n 25
+	echo "--- syslog (wpa/udhcpc):"; grep -E 'wpa_supplicant|udhcpc|wifi' /var/log/messages 2>/dev/null | tail -n 25
+	echo
+}
+
+debug_later() {
+	prev=0
+	for t in $DEBUG_DELAYS; do
+		sleep $((t - prev))
+		prev=$t
+		debug_snapshot "після ${t} с" >>"$DEBUG_LOG" 2>&1
+		sync
 	done
 }
 
-stop_pid() {
-	pidfile=$1
-	if is_running "$pidfile"; then
-		pid=$(cat "$pidfile")
-		kill "$pid" 2>/dev/null
-		waited=0
-		while [ "$waited" -lt "$STOP_TIMEOUT" ] && kill -0 "$pid" 2>/dev/null; do
-			sleep 1
-			waited=$((waited + 1))
-		done
-		kill -9 "$pid" 2>/dev/null
-	fi
-	rm -f "$pidfile"
+# brcmfmac вмикає power save сам (dmesg: "power save enabled"). Плата, що дрімає між кадрами, не відповідає на
+# ARP і з ПК "зникає", хоча DHCP-оренду має. Вимикаємо кілька разів: налаштування застосовується після асоціації.
+wifi_power_save_off() {
+	for t in 5 10 20 40; do
+		sleep "$t"
+		iw dev "$IFACE" set power_save off 2>/dev/null
+	done
+}
+
+is_running() {
+	[ -f "$WPA_PID" ] && kill -0 "$(cat "$WPA_PID")" 2>/dev/null
 }
 
 start() {
-	if is_running "$WPA_PIDFILE"; then
-		echo "wifi: already running (pid $(cat "$WPA_PIDFILE"))"
+	if is_running; then
+		echo "$NAME: already running (pid $(cat "$WPA_PID"))"
 		return 0
 	fi
+	# Далі скрізь return 0: відсутність Wi-Fi не повинна зупиняти завантаження (консоль і Ethernet лишаються).
 	if ! mount_boot; then
-		echo "wifi: cannot mount $BOOT_DEV on $BOOT_DIR" >&2
-		return 1
-	fi
-	if ! has_networks; then
-		echo "wifi: no networks in $CONF (add one: wifi add <ssid>), not starting"
+		echo "$NAME: не вдалося змонтувати $BOOT_DEV на $BOOT_DIR" >&2
 		return 0
 	fi
-
-	# Автопідвантаження модулів (mdev/udev) в образі нема, тому драйвер чипа вантажимо самі.
-	modprobe brcmfmac 2>/dev/null
-	if ! wait_iface; then
-		echo "wifi: $IFACE did not appear (brcmfmac, firmware in /lib/firmware/brcm?)" >&2
-		return 1
+	# Фоновий підпроцес переживе return з start (init не чекає); лог перезаписується при кожному старті.
+	if [ "$(key DEBUG)" != "0" ]; then
+		: >"$DEBUG_LOG"
+		debug_later &
 	fi
-
-	rm -f "$WPA_PIDFILE" "$DHCP_PIDFILE"
-	if ! wpa_supplicant -B -i "$IFACE" -D nl80211 -c "$CONF" -P "$WPA_PIDFILE"; then
-		echo "wifi: wpa_supplicant failed (syntax of $CONF?)" >&2
-		return 1
+	if [ ! -r "$CONF_SRC" ]; then
+		echo "$NAME: нема $CONF_SRC, Wi-Fi не вмикаю (створіть файл за зразком wifi.txt.example)" >&2
+		return 0
 	fi
-	# -b: у фон, якщо адреси одразу нема (мережа ще не знайдена), і далі пробувати там; так
-	# старт системи чекає не довше кількох секунд. -R: віддати адресу при зупинці.
-	udhcpc -b -R -t 2 -T 2 -A 5 -i "$IFACE" -p "$DHCP_PIDFILE" \
-		-x "hostname:$(hostname)" >/dev/null 2>&1
-	echo "wifi: started on $IFACE"
+	if ! make_conf; then
+		rm -f "$CONF"
+		echo "$NAME: у $CONF_SRC нема жодного рядка SSID=..., Wi-Fi не вмикаю" >&2
+		return 0
+	fi
+	waited=0
+	while [ ! -d "/sys/class/net/$IFACE" ] && [ "$waited" -lt "$IFACE_TIMEOUT" ]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if [ ! -d "/sys/class/net/$IFACE" ]; then
+		echo "$NAME: інтерфейс $IFACE не з'явився за ${IFACE_TIMEOUT} с (перевірте dmesg | grep brcmfmac)" >&2
+		return 0
+	fi
+	# Без -B: у знімку 01.11.2026 wpa_supplicant з -B -s не лишався серед процесів і мовчав. Тепер він працює
+	# як звичайний фоновий процес оболонки, а його вивід (-d: налагодження, ключі не друкуються) іде у $WPA_LOG.
+	wpa_supplicant -d -D nl80211 -i "$IFACE" -c "$CONF" >"$WPA_LOG" 2>&1 &
+	echo $! >"$WPA_PID"
+	sleep 1
+	if ! is_running; then
+		echo "$NAME: wpa_supplicant одразу завершився, див. $WPA_LOG" >&2
+	fi
+	wifi_power_save_off &
+	# -b: якщо адреси ще нема (точка доступу не підключила), лишається у фоні й повторює спроби.
+	udhcpc -i "$IFACE" -b -p "$DHCP_PID" -x "hostname:$HOSTNAME_DHCP" -t 3 -T 2 -A 5 -S
+	echo "$NAME: started ($IFACE)"
 }
 
 stop() {
-	stop_pid "$DHCP_PIDFILE"
-	stop_pid "$WPA_PIDFILE"
-	[ -e "/sys/class/net/$IFACE" ] && ifconfig "$IFACE" down 2>/dev/null
-	echo "wifi: stopped"
+	for pidfile in "$DHCP_PID" "$WPA_PID"; do
+		[ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null
+		rm -f "$pidfile"
+	done
+	rm -f "$CONF"
+	echo "$NAME: stopped"
 }
 
 status() {
-	if is_running "$WPA_PIDFILE"; then
-		echo "wifi: running (pid $(cat "$WPA_PIDFILE"))"
-		wpa_cli -i "$IFACE" status 2>/dev/null | grep -E '^(ssid|wpa_state|ip_address)='
+	if is_running; then
+		echo "$NAME is running (pid $(cat "$WPA_PID"))"
+		ip -4 addr show "$IFACE" 2>/dev/null | sed -n 's/^ *inet /  inet /p'
 		return 0
 	fi
-	echo "wifi: not running"
+	echo "$NAME is not running"
 	return 3
 }
 
 case "$1" in
 start) start ;;
 stop) stop ;;
-restart | reload)
+restart)
 	stop
 	start
 	;;

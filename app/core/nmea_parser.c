@@ -31,12 +31,6 @@
 #define MAX_LATITUDE_DEGREES 90.0
 #define MAX_LONGITUDE_DEGREES 180.0
 
-/* У RMC рік двома цифрами: 80..99 це 1980-ті й 1990-ті (приклади зі стандарту), решта 2000-ні. */
-#define YEAR_PIVOT 80
-#define MONTHS_PER_YEAR 12
-#define MAX_DAY_OF_MONTH 31
-#define SECONDS_PER_DAY 86400
-
 #define MAX_SATELLITE_DIGITS 2
 #define MAX_QUALITY_DIGITS 1
 
@@ -53,7 +47,6 @@ enum rmc_field {
 	RMC_LONGITUDE = 5,
 	RMC_LONGITUDE_HEMISPHERE = 6,
 	RMC_SPEED = 7,
-	RMC_DATE = 9,
 };
 
 enum gga_field {
@@ -76,8 +69,6 @@ struct sentence_fields {
 /* Приватні функції описано тут, а визначено внизу: публічні функції йдуть першими. */
 static int split_sentence(const char *sentence, const char *type, struct sentence_fields *fields);
 static int parse_time(const char *field, struct nmea_fix *fix);
-static int parse_date(const char *field, struct nmea_fix *fix);
-static int64_t days_from_civil(int64_t year, unsigned int month, unsigned int day);
 static int parse_position(const char *latitude, const char *latitude_hemisphere,
 			  const char *longitude, const char *longitude_hemisphere,
 			  struct nmea_fix *fix);
@@ -131,14 +122,6 @@ int nmea_parse_rmc(const char *sentence, struct nmea_fix *fix)
 			return error;
 		}
 		result.has_speed = true;
-	}
-
-	/* Дата необов'язкова: деякі модулі обрізають рядок після швидкості. */
-	if (fields.count > RMC_DATE) {
-		error = parse_date(fields.items[RMC_DATE], &result);
-		if (error < 0) {
-			return error;
-		}
 	}
 
 	*fix = result;
@@ -285,71 +268,6 @@ static int parse_time(const char *field, struct nmea_fix *fix)
 	fix->seconds_of_day = hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE + second;
 
 	return 0;
-}
-
-/* Дата "ddmmyy". Порожнє поле означає "дати ще нема" (модуль не чув жодного супутника). */
-static int parse_date(const char *field, struct nmea_fix *fix)
-{
-	unsigned int day;
-	unsigned int month;
-	unsigned int year;
-	size_t i;
-
-	if (field[0] == '\0') {
-		return 0;
-	}
-	for (i = 0; i < 6; i++) {
-		if (!is_digit(field[i])) {
-			return -EINVAL;
-		}
-	}
-	if (field[6] != '\0') {
-		return -EINVAL;
-	}
-
-	day = two_digits(field);
-	month = two_digits(field + 2);
-	if (day < 1 || day > MAX_DAY_OF_MONTH || month < 1 || month > MONTHS_PER_YEAR) {
-		return -EINVAL;
-	}
-
-	fix->has_date = true;
-	fix->day = (uint8_t)day;
-	fix->month = (uint8_t)month;
-	year = two_digits(field + 4);
-	fix->year = (uint16_t)(year >= YEAR_PIVOT ? 1900 + year : 2000 + year);
-
-	return 0;
-}
-
-int64_t nmea_utc_seconds(const struct nmea_fix *fix)
-{
-	if (fix == NULL || !fix->has_date || !fix->has_time) {
-		return -1;
-	}
-
-	return days_from_civil(fix->year, fix->month, fix->day) * SECONDS_PER_DAY +
-	       fix->seconds_of_day;
-}
-
-/*
- * Скільки днів від 1970-01-01 до дати григоріанського календаря (алгоритм Говарда Хіннанта
- * "days_from_civil"): без таблиць місяців і без timegm(), якої нема в POSIX.
- */
-static int64_t days_from_civil(int64_t year, unsigned int month, unsigned int day)
-{
-	int64_t era;
-	unsigned int year_of_era;
-	unsigned int day_of_year;
-	unsigned int day_of_era;
-
-	year -= month <= 2;
-	era = year / 400;
-	year_of_era = (unsigned int)(year - era * 400);
-	day_of_year = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-	day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-
-	return era * 146097 + (int64_t)day_of_era - 719468;
 }
 
 /*

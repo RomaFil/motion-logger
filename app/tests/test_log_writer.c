@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -703,6 +704,184 @@ static void test_unknown_source_counts_as_failed(void)
 	unlink(path);
 }
 
+/*
+ * Файл сирих відліків: заголовок-коментар і по рядку на кожен відлік (час, три осі), у тому ж
+ * порядку; лог при цьому той самий, що й без файлу.
+ */
+static void test_raw_dump_has_every_accel_sample(void)
+{
+	static struct sample
+	    storage[(STILL_SECONDS + MOVING_SECONDS + STILL_SECONDS) * ACCEL_RATE_HZ];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct log_writer_options options = {0};
+	char line[LOG_WRITER_LINE_SIZE];
+	char path[TEMP_PATH_SIZE];
+	char raw_path[TEMP_PATH_SIZE];
+	int64_t moving_start_ms;
+	int64_t moving_end_ms;
+	size_t samples;
+	size_t lines = 0;
+	FILE *file;
+
+	make_temp_path(path);
+	make_temp_path(raw_path);
+	options.raw_path = raw_path;
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	samples = fill_still_moving_still(&rb, &moving_start_ms, &moving_end_ms);
+
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+	CHECK(stats.failed == 0);
+	CHECK(stats.events == 2);
+
+	file = fopen(raw_path, "r");
+	CHECK(file != NULL);
+	if (file != NULL) {
+		CHECK(fgets(line, sizeof(line), file) != NULL);
+		CHECK(strcmp(line, "# t_ms,x_g,y_g,z_g\n") == 0);
+		while (fgets(line, sizeof(line), file) != NULL) {
+			long long time_ms;
+			double x_g;
+			double y_g;
+			double z_g;
+
+			CHECK(sscanf(line, "%lld,%lf,%lf,%lf", &time_ms, &x_g, &y_g, &z_g) == 4);
+			CHECK(time_ms == (long long)lines * MS_PER_SAMPLE);
+			CHECK(fabs(z_g - 1.0) <= MOVING_AMPLITUDE_G + 1e-4);
+			lines++;
+		}
+		fclose(file);
+	}
+	CHECK(lines == samples);
+
+	check_start_then_stop(path, moving_start_ms, moving_end_ms);
+	ring_buffer_destroy(&rb);
+	unlink(path);
+	unlink(raw_path);
+}
+
+/* Файл сирих відліків, який не вдалося створити, це помилка запуску: лог не лишається відкритим. */
+static void test_raw_dump_reports_unwritable_path(void)
+{
+	static struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_options options = {.raw_path = "/nonexistent-dir/raw.csv"};
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == -ENOENT);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+#define SETTLE_MS 50
+#define PAUSE_TEST_CAPACITY 600
+
+/* Чекає, поки записувач забере все з буфера й обробить останній запис. */
+static void wait_until_written(struct ring_buffer *rb)
+{
+	const struct timespec millisecond = {.tv_sec = 0, .tv_nsec = 1000000L};
+	const struct timespec settle = {.tv_sec = 0, .tv_nsec = SETTLE_MS * 1000000L};
+
+	while (!ring_buffer_is_empty(rb)) {
+		nanosleep(&millisecond, NULL);
+	}
+	nanosleep(&settle, NULL);
+}
+
+/* Поки запис на паузі, числа забираються з буфера, але в лог не потрапляють; після паузи йдуть. */
+static void test_paused_samples_are_dropped_and_counted(void)
+{
+	struct sample storage[SMALL_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	char path[TEMP_PATH_SIZE];
+	int32_t i;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+
+	log_writer_set_paused(&lw, true);
+	for (i = 0; i < 3; i++) {
+		CHECK(push_value(&rb, i) == 0);
+	}
+	wait_until_written(&rb);
+
+	log_writer_set_paused(&lw, false);
+	for (i = 0; i < 2; i++) {
+		CHECK(push_value(&rb, i) == 0);
+	}
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.paused == 3);
+	CHECK(stats.written == 2);
+	CHECK(stats.failed == 0);
+	check_log_file(path, 2);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
+/* Кладе в буфер STILL_SECONDS спокою і MOVING_SECONDS руху, починаючи з мітки start_ms. */
+static void push_still_then_moving(struct ring_buffer *rb, int64_t start_ms)
+{
+	const int still_samples = STILL_SECONDS * ACCEL_RATE_HZ;
+	const int total = (STILL_SECONDS + MOVING_SECONDS) * ACCEL_RATE_HZ;
+	int i;
+
+	for (i = 0; i < total; i++) {
+		double z_g = 1.0;
+		struct sample item;
+
+		if (i >= still_samples) {
+			z_g += (i % 2 == 0) ? MOVING_AMPLITUDE_G : -MOVING_AMPLITUDE_G;
+		}
+		item = make_accel_item(start_ms + (int64_t)i * MS_PER_SAMPLE, 0.0, 0.0, z_g);
+		CHECK(ring_buffer_push(rb, &item) == 0);
+	}
+}
+
+/* Прапорець руху стає true після MOVE_START, а пауза з наступним зняттям скидає його. */
+static void test_moving_flag_follows_events_and_resets_after_pause(void)
+{
+	static struct sample storage[PAUSE_TEST_CAPACITY];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct sample item;
+	char path[TEMP_PATH_SIZE];
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, PAUSE_TEST_CAPACITY) == 0);
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(!log_writer_is_moving(&lw));
+	CHECK(!log_writer_is_moving(NULL));
+
+	push_still_then_moving(&rb, 0);
+	wait_until_written(&rb);
+	CHECK(log_writer_is_moving(&lw));
+
+	/* Пауза й зняття паузи: фільтр починає заново, перший відлік у спокої прапорець скидає. */
+	log_writer_set_paused(&lw, true);
+	log_writer_set_paused(&lw, false);
+	CHECK(!log_writer_is_moving(&lw)); /* скинуто одразу, до першого відліку після паузи */
+	item = make_accel_item(1000000, 0.0, 0.0, 1.0);
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+	wait_until_written(&rb);
+	CHECK(!log_writer_is_moving(&lw));
+
+	CHECK(log_writer_stop(&lw, NULL) == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 /* Скільки рядків у файлі; -1, якщо файла нема. Перший рядок кладе в first (може бути NULL). */
 static long count_file_lines(const char *path, char *first, size_t first_size)
 {
@@ -722,43 +901,6 @@ static long count_file_lines(const char *path, char *first, size_t first_size)
 	fclose(file);
 
 	return lines;
-}
-
-static void test_format_gps_adds_utc_when_known(void)
-{
-	char line[LOG_WRITER_LINE_SIZE];
-	struct sample item = make_gps_item(21000, true, 8);
-
-	item.gps_utc_s = 1793188808; /* 2026-10-28 12:00:08 UTC */
-	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
-	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gps\",\"fix\":true,\"lat\":50.450100,"
-			   "\"lon\":30.523400,\"speed_knots\":0.30,\"sats\":8,"
-			   "\"utc\":\"2026-10-28T12:00:08Z\"}\n") == 0);
-
-	item = make_gps_item(3000, false, -1);
-	item.gps_utc_s = 1793188808;
-	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
-	CHECK(strcmp(line, "{\"t_ms\":3000,\"src\":\"gps\",\"fix\":false,\"sats\":null,"
-			   "\"utc\":\"2026-10-28T12:00:08Z\"}\n") == 0);
-
-	/* -1 (часу ще нема) і 0 (поле не заповнене) дають рядок без utc */
-	item.gps_utc_s = -1;
-	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
-	CHECK(strstr(line, "utc") == NULL);
-}
-
-static void test_format_button_produces_exact_json(void)
-{
-	char line[LOG_WRITER_LINE_SIZE];
-	char tiny[8];
-
-	CHECK(log_writer_format_button(line, sizeof(line), 52100, 1) > 0);
-	CHECK(strcmp(line,
-		     "{\"t_ms\":52100,\"src\":\"button\",\"button\":1,\"event\":\"PRESS\"}\n") ==
-	      0);
-	CHECK(log_writer_format_button(line, sizeof(line), 0, 0) == -EINVAL);
-	CHECK(log_writer_format_button(NULL, sizeof(line), 0, 1) == -EINVAL);
-	CHECK(log_writer_format_button(tiny, sizeof(tiny), 0, 1) == -ENOSPC);
 }
 
 static void test_format_open_produces_exact_json(void)
@@ -803,36 +945,26 @@ static void test_new_log_file_is_private(void)
 	unlink(path);
 }
 
-/* Рядок відкриття йде першим; стан для світлодіодів оновлюється з записів GPS і кнопки ні. */
-static void test_config_start_writes_open_marker_and_status(void)
+/* Рядок відкриття йде першим, далі звичайні рядки. */
+static void test_open_marker_is_the_first_line(void)
 {
 	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 	struct log_writer_stats stats;
-	struct device_status status;
-	struct sample gps = make_gps_item(3000, true, 7);
-	struct sample button = {.source = SAMPLE_SOURCE_BUTTON, .time_ms = 4000, .value = 2};
+	struct log_writer_options options = {.open_marker = true};
 	char path[TEMP_PATH_SIZE];
 	char first[LOG_WRITER_LINE_SIZE] = "";
-	struct log_writer_config config = {.open_marker = true, .status = &status};
 
 	make_temp_path(path);
-	config.path = path;
-	device_status_init(&status, false, true, 1);
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
-	CHECK(ring_buffer_push(&rb, &gps) == 0);
-	CHECK(ring_buffer_push(&rb, &button) == 0);
-
-	CHECK(log_writer_start_config(&lw, &rb, &config) == 0);
+	CHECK(push_value(&rb, 0) == 0);
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == 0);
 	CHECK(log_writer_stop(&lw, &stats) == 0);
 
-	CHECK(stats.written == 3 && stats.gps == 1 && stats.buttons == 1 && stats.failed == 0);
-	CHECK(count_file_lines(path, first, sizeof(first)) == 3);
+	CHECK(stats.written == 2 && stats.failed == 0);
+	CHECK(count_file_lines(path, first, sizeof(first)) == 2);
 	CHECK(strstr(first, "\"src\":\"log\",\"event\":\"open\"") != NULL);
-	CHECK(atomic_load(&status.gps_fix));
-	CHECK(atomic_load(&status.last_gps_ms) > 0);
-	CHECK(atomic_load(&status.last_failure_ms) == 0);
 
 	ring_buffer_destroy(&rb);
 	unlink(path);
@@ -849,18 +981,17 @@ static void test_rotation_keeps_limited_number_of_files(void)
 	char path[TEMP_PATH_SIZE];
 	char name[TEMP_PATH_SIZE + 8];
 	char first[LOG_WRITER_LINE_SIZE];
-	struct log_writer_config config = {.max_bytes = 400, .keep = 2, .open_marker = true};
+	struct log_writer_options options = {.max_bytes = 400, .keep = 2, .open_marker = true};
 	unsigned int i;
 	int32_t value;
 
 	make_temp_path(path);
-	config.path = path;
 	CHECK(ring_buffer_init(&rb, storage, PREFILLED_SAMPLES) == 0);
 	for (value = 0; value < 100; value++) {
 		CHECK(push_value(&rb, value) == 0);
 	}
 
-	CHECK(log_writer_start_config(&lw, &rb, &config) == 0);
+	CHECK(log_writer_start_with(&lw, &rb, path, &options) == 0);
 	CHECK(log_writer_stop(&lw, &stats) == 0);
 
 	CHECK(stats.rotations >= 3);
@@ -888,31 +1019,36 @@ static void test_rotation_keeps_limited_number_of_files(void)
 	unlink(path);
 }
 
-static void test_config_start_rejects_bad_arguments(void)
+static void test_rotation_rejects_bad_arguments(void)
 {
 	struct sample storage[SMALL_CAPACITY];
 	struct ring_buffer rb;
 	struct log_writer lw;
 	char long_path[LOG_WRITER_PATH_SIZE];
-	struct log_writer_config config = {.path = "/tmp/x", .max_bytes = 100, .keep = 0};
+	struct log_writer_options options = {.max_bytes = 100, .keep = 0};
 
 	CHECK(ring_buffer_init(&rb, storage, SMALL_CAPACITY) == 0);
-	CHECK(log_writer_start_config(&lw, &rb, NULL) == -EINVAL);
-	CHECK(log_writer_start_config(&lw, &rb, &config) == -EINVAL);
-	config.keep = LOG_WRITER_MAX_KEEP + 1;
-	CHECK(log_writer_start_config(&lw, &rb, &config) == -EINVAL);
+	CHECK(log_writer_start_with(&lw, &rb, "/tmp/x", &options) == -EINVAL);
+	options.keep = LOG_WRITER_MAX_KEEP + 1;
+	CHECK(log_writer_start_with(&lw, &rb, "/tmp/x", &options) == -EINVAL);
 
 	memset(long_path, 'a', sizeof(long_path) - 1);
 	long_path[0] = '/';
 	long_path[sizeof(long_path) - 1] = '\0';
-	config.path = long_path;
-	config.keep = 1;
-	CHECK(log_writer_start_config(&lw, &rb, &config) == -ENAMETOOLONG);
+	options.keep = 1;
+	CHECK(log_writer_start_with(&lw, &rb, long_path, &options) == -ENAMETOOLONG);
 	ring_buffer_destroy(&rb);
 }
 
 int main(void)
 {
+	test_format_open_produces_exact_json();
+	test_new_log_file_is_private();
+	test_open_marker_is_the_first_line();
+	test_rotation_keeps_limited_number_of_files();
+	test_rotation_rejects_bad_arguments();
+	test_raw_dump_has_every_accel_sample();
+	test_raw_dump_reports_unwritable_path();
 	test_format_line_produces_exact_json();
 	test_format_line_rejects_bad_input();
 	test_format_event_produces_exact_json();
@@ -936,13 +1072,8 @@ int main(void)
 	test_aux_samples_are_written_once_per_second();
 	test_gps_samples_are_written_in_order();
 	test_unknown_source_counts_as_failed();
-	test_format_gps_adds_utc_when_known();
-	test_format_button_produces_exact_json();
-	test_format_open_produces_exact_json();
-	test_new_log_file_is_private();
-	test_config_start_writes_open_marker_and_status();
-	test_rotation_keeps_limited_number_of_files();
-	test_config_start_rejects_bad_arguments();
+	test_paused_samples_are_dropped_and_counted();
+	test_moving_flag_follows_events_and_resets_after_pause();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);

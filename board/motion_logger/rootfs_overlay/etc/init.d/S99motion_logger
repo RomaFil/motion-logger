@@ -24,19 +24,27 @@ STOP_TIMEOUT=5
 RESTART_DELAY=2
 RESTART_DELAY_MAX=60
 RESTART_RESET=60
+# Де ядро показує IIO-датчики, і скільки секунд чекати датчик із потрібним ім'ям (драйвер міг
+# ще не встигнути з'явитись, коли init дійшов до S99).
+IIO_ROOT=/sys/bus/iio/devices
+IIO_WAIT=10
 
 # Параметри запуску (джерело відліків, лог) лежать окремо, щоб не правити скрипт:
-# /etc/default/motion_logger, змінна MOTION_LOGGER_OPTS.
+# /etc/default/motion_logger, змінні MOTION_LOGGER_OPTS і MOTION_LOGGER_IIO_RATES.
+# У MOTION_LOGGER_OPTS слово @ім'я (наприклад @mpu6050) скрипт замінює на каталог IIO-датчика з
+# таким ім'ям: номер iio:deviceN залежить від порядку підключення драйверів і може змінитись.
 MOTION_LOGGER_OPTS=""
+MOTION_LOGGER_IIO_RATES=""
 [ -r /etc/default/$NAME ] && . /etc/default/$NAME
 
-# Службова функція: 0, якщо процес із PID-файлу живий.
+# Службова функція: 0, якщо процес із PID-файлу $1 (за замовчуванням PIDFILE) живий.
 is_running() {
-	[ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+	pidfile=${1:-$PIDFILE}
+	[ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
 }
 
 # Наглядач: працює у власному процесі (запускається у фоні), перезапускає програму після аварії.
-# SIGTERM передається програмі; поки вона дописує лог, наглядач чекає.
+# SIGTERM передається програмі; поки вона дописує лог, наглядач чекає. Параметри: змінна opts.
 supervise() {
 	child=
 	pause_pid=
@@ -46,7 +54,7 @@ supervise() {
 	while :; do
 		started=$(date +%s)
 		# shellcheck disable=SC2086  # параметри з файлу налаштувань мають розбиватись на слова
-		"$DAEMON" $MOTION_LOGGER_OPTS &
+		"$DAEMON" $opts &
 		child=$!
 		echo "$child" >"$CHILD_PIDFILE"
 		# wait повертається й тоді, коли прийшов сигнал: чекаємо, поки програма справді вийде.
@@ -72,8 +80,58 @@ supervise() {
 	done
 }
 
+# Друкує каталог IIO-датчика з іменем $1 (файл name), чекаючи до IIO_WAIT секунд. Код 1, якщо нема.
+find_iio_dir() {
+	waited=0
+	while :; do
+		for dir in "$IIO_ROOT"/iio:device*; do
+			if [ -r "$dir/name" ] && [ "$(cat "$dir/name")" = "$1" ]; then
+				echo "$dir"
+				return 0
+			fi
+		done
+		[ "$waited" -ge "$IIO_WAIT" ] && return 1
+		sleep 1
+		waited=$((waited + 1))
+	done
+}
+
+# Друкує параметри $1, замінивши кожне слово @ім'я на каталог датчика з таким іменем.
+# Код 1, якщо датчика з ім'ям нема.
+resolve_opts() {
+	resolved=""
+	for word in $1; do
+		case "$word" in
+		@*)
+			dir=$(find_iio_dir "${word#@}") || {
+				echo "$NAME: no IIO device named ${word#@}" >&2
+				return 1
+			}
+			word=$dir
+			;;
+		esac
+		resolved="$resolved $word"
+	done
+	echo "$resolved"
+}
+
+# Виставляє частоту самого датчика за списком "ім'я:Гц" (MPU6050 за замовчуванням дає 50 Гц, а
+# --iio-rate лише частота опитування). Помилка не зупиняє запуск: датчик працюватиме на своїй частоті.
+set_iio_rates() {
+	for pair in $MOTION_LOGGER_IIO_RATES; do
+		name=${pair%%:*}
+		hz=${pair#*:}
+		dir=$(find_iio_dir "$name") || {
+			echo "$NAME: no IIO device named $name, rate not set" >&2
+			continue
+		}
+		echo "$hz" >"$dir/sampling_frequency" 2>/dev/null ||
+			echo "$NAME: cannot set $name to $hz Hz" >&2
+	done
+}
+
 start() {
-	if is_running "$PIDFILE"; then
+	if is_running; then
 		echo "$NAME: already running (pid $(cat "$PIDFILE"))"
 		return 0
 	fi
@@ -83,6 +141,12 @@ start() {
 		kill -9 "$(cat "$CHILD_PIDFILE")" 2>/dev/null
 	fi
 	rm -f "$CHILD_PIDFILE"
+
+	opts=$(resolve_opts "$MOTION_LOGGER_OPTS") || {
+		echo "$NAME: not started" >&2
+		return 1
+	}
+	set_iio_rates
 
 	# Вивід: на DBG1, якщо порт доступний на запис, інакше у файл (слайд 39: логи кудись пишуться).
 	if [ -w "$DEBUG_TTY" ]; then
@@ -95,7 +159,7 @@ start() {
 }
 
 stop() {
-	if ! is_running "$PIDFILE"; then
+	if ! is_running; then
 		rm -f "$PIDFILE"
 		echo "$NAME: not running"
 		return 0
@@ -120,7 +184,7 @@ stop() {
 }
 
 status() {
-	if is_running "$PIDFILE"; then
+	if is_running; then
 		if is_running "$CHILD_PIDFILE"; then
 			echo "$NAME is running (pid $(cat "$CHILD_PIDFILE"), supervisor $(cat "$PIDFILE"))"
 		else

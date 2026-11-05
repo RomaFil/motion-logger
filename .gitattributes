@@ -13,3 +13,4 @@ Makefile text eol=lf
 *.py text eol=lf
 # NMEA як є від модуля: з CRLF у кінці рядків, git їх не чіпає
 *.nmea -text
+S41* text eol=lf

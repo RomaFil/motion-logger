@@ -8,3 +8,7 @@ build/
 local.mk
 __pycache__/
 *.pyc
+# Wi-Fi: справжні мережі й паролі (зразок: board/motion_logger/wifi.txt.example)
+wifi.txt
+wifi.secret
+*.secret

@@ -14,13 +14,16 @@
  *   --iio-rate <Гц>      частота опитування IIO, 1..1000 (за замовчуванням 100)
  *   --gps <порт>         GPS по послідовному порту, наприклад /dev/ttyAMA2
  *   --gps-baud <бод>     швидкість порту (за замовчуванням 9600)
- *   --gpio <чип>         світлодіоди стану й кнопки плати, наприклад /dev/gpiochip0 (потрібен
- * --log)
- *   --button-active-high кнопка дає 3,3 В при натисканні (за замовчуванням замикає на землю)
  * Результат:
  *   --log <файл>         JSON Lines (див. log_writer.h); без нього відліки лише збираються в буфері
  *   --log-max-mb <МБ>    ротація: новий файл, коли лог досяг розміру; старі <файл>.1 … .N
  *   --log-keep <N>       скільки старих файлів лишати, 1..99 (за замовчуванням 5)
+ *   --dump-raw <файл>    додатково пише СИРІ відліки основного акселерометра (t_ms,x_g,y_g,z_g)
+ *                        для analyze_recording; потребує --log
+ *   --ui-gpio <чіп>      кнопка паузи (GPIO17) і три світлодіоди етапів руху (libgpiod, збірка
+ * GPIOD=1), наприклад gpiochip0: світить 1 до першого руху, 2 під час руху, 3 після зупинки, на
+ * паузі всі три; потребує --log. До нього --ui-no-button (лише світлодіоди) чи
+ * --ui-button-active-low (кнопка дає 0 при натисканні)
  *
  * Без жодного джерела програма нічого не читає й одразу завершується успішно: так її запускає
  * скрипт автозапуску образу, коли в /etc/default/motion_logger параметрів нема.
@@ -42,19 +45,18 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <sys/epoll.h>
-
 #include "csv_player.h"
-#include "device_status.h"
-#include "gpio_lines.h"
 #include "gps_reader.h"
 #include "iio_accel.h"
-#include "io_util.h"
 #include "log_writer.h"
 #include "ring_buffer.h"
 #include "sample_reader.h"
 #include "sensor_reader.h"
 #include "uart_port.h"
+#include "ui_controller.h"
+#ifdef HAVE_GPIOD
+#include "gpiod_ui.h"
+#endif
 
 #define BUFFER_CAPACITY 4096
 #define MAX_TASKS 4
@@ -70,8 +72,10 @@
 #define LOG_OPTION "--log"
 #define LOG_MAX_MB_OPTION "--log-max-mb"
 #define LOG_KEEP_OPTION "--log-keep"
-#define GPIO_OPTION "--gpio"
-#define BUTTON_ACTIVE_HIGH_OPTION "--button-active-high"
+#define DUMP_RAW_OPTION "--dump-raw"
+#define UI_GPIO_OPTION "--ui-gpio"
+#define UI_NO_BUTTON_OPTION "--ui-no-button"
+#define UI_ACTIVE_LOW_OPTION "--ui-button-active-low"
 
 #define REALTIME_SPEED 1.0
 #define DEFAULT_IIO_RATE_HZ 100
@@ -79,22 +83,6 @@
 #define DEFAULT_LOG_KEEP 5
 #define MAX_LOG_MB 100000
 #define BYTES_PER_MB (1024ULL * 1024ULL)
-
-/* Плата Motion Logger (README, «Схема підключення»): номери GPIO на гребінці Pi 5. */
-#define LED_RED_GPIO 27
-#define LED_GREEN_GPIO 22
-#define LED_BLUE_GPIO 6
-#define BUTTON1_GPIO 17
-#define BUTTON2_GPIO 13
-#define LED_COUNT 3
-#define BUTTON_COUNT 2
-#define LED_RED_BIT (1U << 0)
-#define LED_GREEN_BIT (1U << 1)
-#define LED_BLUE_BIT (1U << 2)
-#define BUTTON_DEBOUNCE_US 30000
-/* Як часто оновлюються світлодіоди: досить для блимання 2 Гц. */
-#define LED_TICK_MS 50
-#define GPIO_CONSUMER "motion_logger"
 #define IIO_PATH_SIZE 256
 
 /* Параметри запуску, розібрані з командного рядка. */
@@ -108,12 +96,14 @@ struct options {
 	const char *gps_path; /* NULL, якщо --gps не задано */
 	unsigned int gps_baud;
 	const char *log_path;	 /* NULL, якщо --log не задано */
+	const char *raw_path;	 /* NULL, якщо --dump-raw не задано */
 	unsigned int log_max_mb; /* 0: без ротації */
 	unsigned int log_keep;
-	const char *gpio_chip; /* NULL, якщо --gpio не задано */
-	bool button_active_high;
 	char iio_resolved[IIO_PATH_SIZE];     /* каталог для --iio, заданого іменем */
 	char iio_aux_resolved[IIO_PATH_SIZE]; /* те саме для --iio-aux */
+	const char *ui_chip; /* мікросхема GPIO для кнопки й світлодіодів, або NULL */
+	bool ui_no_button;   /* лише світлодіоди, кнопки нема */
+	bool ui_active_low;  /* кнопка дає 0 при натисканні, а не 1 */
 };
 
 /* Скільки записів прийшло від джерела і скільки з них не влізло в буфер. */
@@ -132,10 +122,8 @@ struct task {
 	struct sensor *sensor;	   /* датчик (replay чи IIO), або NULL */
 	enum sample_source source; /* яким джерелом позначати записи датчика */
 	const unsigned long
-	    *line_number;	      /* номер рядка CSV для повідомлення про помилку, або NULL */
-	struct device_status *status; /* для світлодіодів (лише задача GPIO) */
-	int led_fd;		      /* лінії світлодіодів, або -1 */
-	int button_fd;		      /* лінії кнопок, або -1 */
+	    *line_number; /* номер рядка CSV для повідомлення про помилку, або NULL */
+	struct ui_controller *ui_controller; /* кнопка й світлодіод, або NULL */
 	pthread_t thread;
 	bool started;
 	int result;
@@ -144,9 +132,6 @@ struct task {
 
 /* Стає 1, коли користувач натиснув Ctrl+C або init просить зупинитись (SIGTERM). */
 static volatile sig_atomic_t stop_requested;
-
-/* Стає 1, коли всі джерела даних завершились: тоді й світлодіодам більше нічого показувати. */
-static volatile sig_atomic_t sources_finished;
 
 static int parse_options(int argc, char **argv, struct options *options);
 static int parse_speed(const char *text, double *speed);
@@ -157,13 +142,16 @@ static void handle_stop_signal(int signal_number);
 static int install_stop_handlers(void);
 static bool has_any_source(const struct options *options);
 static int run_sources(const struct options *options, struct ring_buffer *buffer,
-		       struct device_status *status, struct source_stats *total);
+		       struct log_writer *writer, struct source_stats *total);
 static void *task_thread(void *argument);
 static int run_stdin_task(struct task *task);
 static int run_sensor_task(struct task *task);
 static int run_gps_task(struct task *task);
-static int run_gpio_task(struct task *task);
-static void show_leds(int led_fd, const struct status_leds *leds);
+#ifdef HAVE_GPIOD
+static int run_ui_task(struct task *task);
+static void ui_set_recording(void *context, bool recording);
+static bool ui_is_moving(void *context);
+#endif
 
 int main(int argc, char **argv)
 {
@@ -172,7 +160,6 @@ int main(int argc, char **argv)
 	struct source_stats source_stats = {0};
 	struct log_writer_stats log_stats = {0};
 	struct log_writer writer;
-	struct device_status status;
 	struct options options;
 	bool writer_started = false;
 	int result;
@@ -203,21 +190,15 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	/* --stdin дає числа імітатора, а не відліки акселерометра: за ними світлодіоди не стежать.
-	 */
-	device_status_init(&status, options.replay_path != NULL || options.iio_path != NULL,
-			   options.gps_path != NULL, monotonic_ms());
-
 	if (options.log_path != NULL) {
-		struct log_writer_config config = {
-		    .path = options.log_path,
+		struct log_writer_options writer_options = {
+		    .raw_path = options.raw_path,
 		    .max_bytes = (uint64_t)options.log_max_mb * BYTES_PER_MB,
 		    .keep = options.log_keep,
 		    .open_marker = true,
-		    .status = &status,
 		};
 
-		result = log_writer_start_config(&writer, &buffer, &config);
+		result = log_writer_start_with(&writer, &buffer, options.log_path, &writer_options);
 		if (result < 0) {
 			fprintf(stderr, "motion_logger: log %s: %s\n", options.log_path,
 				strerror(-result));
@@ -226,7 +207,7 @@ int main(int argc, char **argv)
 		writer_started = true;
 	}
 
-	result = run_sources(&options, &buffer, &status, &source_stats);
+	result = run_sources(&options, &buffer, writer_started ? &writer : NULL, &source_stats);
 
 	/* Джерела закінчили, нових записів не буде: тепер записувач може дописати залишок. */
 	if (writer_started) {
@@ -239,10 +220,10 @@ int main(int argc, char **argv)
 	}
 
 	printf("received %zu, dropped %zu, read errors %zu, logged %zu (events %zu, rows %zu, "
-	       "aux %zu, gps %zu, buttons %zu), log errors %zu, rotations %zu, in buffer %zu\n",
+	       "aux %zu, gps %zu), log errors %zu, rotations %zu, in buffer %zu\n",
 	       source_stats.received, source_stats.dropped, source_stats.errors, log_stats.written,
-	       log_stats.events, log_stats.rows, log_stats.aux, log_stats.gps, log_stats.buttons,
-	       log_stats.failed, log_stats.rotations, ring_buffer_count(&buffer));
+	       log_stats.events, log_stats.rows, log_stats.aux, log_stats.gps, log_stats.failed,
+	       log_stats.rotations, ring_buffer_count(&buffer));
 
 cleanup:
 	ring_buffer_destroy(&buffer);
@@ -309,10 +290,14 @@ static int parse_options(int argc, char **argv, struct options *options)
 				return -EINVAL;
 			}
 			keep_given = true;
-		} else if (has_value && strcmp(argv[i], GPIO_OPTION) == 0) {
-			options->gpio_chip = argv[++i];
-		} else if (strcmp(argv[i], BUTTON_ACTIVE_HIGH_OPTION) == 0) {
-			options->button_active_high = true;
+		} else if (has_value && strcmp(argv[i], DUMP_RAW_OPTION) == 0) {
+			options->raw_path = argv[++i];
+		} else if (has_value && strcmp(argv[i], UI_GPIO_OPTION) == 0) {
+			options->ui_chip = argv[++i];
+		} else if (strcmp(argv[i], UI_NO_BUTTON_OPTION) == 0) {
+			options->ui_no_button = true;
+		} else if (strcmp(argv[i], UI_ACTIVE_LOW_OPTION) == 0) {
+			options->ui_active_low = true;
 		} else {
 			return -EINVAL;
 		}
@@ -338,12 +323,18 @@ static int parse_options(int argc, char **argv, struct options *options)
 	if (keep_given && options->log_max_mb == 0) {
 		return -EINVAL; /* старі файли бувають лише з ротацією */
 	}
-	/* Світлодіоди показують стан, який веде записувач логу. */
-	if (options->gpio_chip != NULL && options->log_path == NULL) {
+	if (options->raw_path != NULL && options->log_path == NULL) {
+		return -EINVAL; /* сирі відліки пише той самий записувач, що й лог */
+	}
+	if ((options->ui_active_low || options->ui_no_button) && options->ui_chip == NULL) {
 		return -EINVAL;
 	}
-	if (options->button_active_high && options->gpio_chip == NULL) {
-		return -EINVAL;
+	if (options->ui_active_low && options->ui_no_button) {
+		return -EINVAL; /* полярність кнопки без кнопки не має змісту */
+	}
+	if (options->ui_chip != NULL && options->log_path == NULL) {
+		return -EINVAL; /* світлодіоди й кнопка працюють із записувачем логу: без --log
+				   нічого показувати */
 	}
 
 	return 0;
@@ -419,10 +410,11 @@ static void print_usage(const char *program)
 {
 	fprintf(stderr,
 		"usage: %s [%s | %s file [%s factor] | %s dir|name [%s hz]] [%s dir|name] "
-		"[%s port [%s baud]] [%s file [%s mb [%s n]]] [%s chip [%s]]\n",
+		"[%s port [%s baud]] [%s file [%s mb [%s n]] [%s file] [%s chip [%s | %s]]]\n",
 		program, STDIN_OPTION, REPLAY_OPTION, SPEED_OPTION, IIO_OPTION, IIO_RATE_OPTION,
 		IIO_AUX_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION, LOG_MAX_MB_OPTION,
-		LOG_KEEP_OPTION, GPIO_OPTION, BUTTON_ACTIVE_HIGH_OPTION);
+		LOG_KEEP_OPTION, DUMP_RAW_OPTION, UI_GPIO_OPTION, UI_NO_BUTTON_OPTION,
+		UI_ACTIVE_LOW_OPTION);
 }
 
 static bool has_any_source(const struct options *options)
@@ -455,12 +447,17 @@ static int install_stop_handlers(void)
  * кожне, чекає їх і закриває ресурси. Єдине місце, де драйвери підставляються для ядра.
  */
 static int run_sources(const struct options *options, struct ring_buffer *buffer,
-		       struct device_status *status, struct source_stats *total)
+		       struct log_writer *writer, struct source_stats *total)
 {
 	struct task tasks[MAX_TASKS];
 	struct csv_player player;
 	struct iio_accel primary_iio;
 	struct iio_accel aux_iio;
+#ifdef HAVE_GPIOD
+	struct ui_controller ui_control;
+	struct gpiod_ui ui_driver;
+	bool ui_open = false;
+#endif
 	size_t count = 0;
 	size_t i;
 	int result = 0;
@@ -468,14 +465,10 @@ static int run_sources(const struct options *options, struct ring_buffer *buffer
 	bool primary_iio_open = false;
 	bool aux_iio_open = false;
 	int gps_fd = -1;
-	int led_fd = -1;
-	int button_fd = -1;
 
 	memset(tasks, 0, sizeof(tasks));
 	for (i = 0; i < MAX_TASKS; i++) {
 		tasks[i].fd = -1;
-		tasks[i].led_fd = -1;
-		tasks[i].button_fd = -1;
 		tasks[i].buffer = buffer;
 	}
 
@@ -542,36 +535,33 @@ static int run_sources(const struct options *options, struct ring_buffer *buffer
 		tasks[count].fd = gps_fd;
 		count++;
 	}
-	if (options->gpio_chip != NULL) {
-		static const unsigned int leds[LED_COUNT] = {LED_RED_GPIO, LED_GREEN_GPIO,
-							     LED_BLUE_GPIO};
-		static const unsigned int buttons[BUTTON_COUNT] = {BUTTON1_GPIO, BUTTON2_GPIO};
+	if (options->ui_chip != NULL) {
+#ifdef HAVE_GPIOD
+		struct gpiod_ui_config ui_config = gpiod_ui_default_config(options->ui_chip);
+		struct ui_hooks hooks = {.set_recording = ui_set_recording,
+					 .is_moving = ui_is_moving,
+					 .context = writer};
 
-		led_fd =
-		    gpio_lines_request_outputs(options->gpio_chip, leds, LED_COUNT, GPIO_CONSUMER);
-		if (led_fd < 0) {
-			fprintf(stderr, "motion_logger: gpio %s (LEDs): %s\n", options->gpio_chip,
-				strerror(-led_fd));
-			result = led_fd;
-			led_fd = -1;
+		ui_config.use_button = !options->ui_no_button;
+		ui_config.button_active_high = !options->ui_active_low;
+		result = gpiod_ui_open(&ui_driver, &ui_config);
+		if (result < 0) {
+			fprintf(stderr, "motion_logger: ui %s: %s\n", options->ui_chip,
+				strerror(-result));
 			goto cleanup;
 		}
-		button_fd = gpio_lines_request_buttons(options->gpio_chip, buttons, BUTTON_COUNT,
-						       !options->button_active_high,
-						       BUTTON_DEBOUNCE_US, GPIO_CONSUMER);
-		if (button_fd < 0) {
-			fprintf(stderr, "motion_logger: gpio %s (buttons): %s\n",
-				options->gpio_chip, strerror(-button_fd));
-			result = button_fd;
-			button_fd = -1;
-			goto cleanup;
-		}
-		tasks[count].name = "gpio";
-		tasks[count].run = run_gpio_task;
-		tasks[count].status = status;
-		tasks[count].led_fd = led_fd;
-		tasks[count].button_fd = button_fd;
+		ui_open = true;
+		ui_controller_init(&ui_control, &ui_driver.base, &hooks);
+		tasks[count].name = "ui";
+		tasks[count].run = run_ui_task;
+		tasks[count].ui_controller = &ui_control;
 		count++;
+#else
+		(void)writer; /* кнопці потрібен лише збір із GPIOD=1 */
+		fprintf(stderr, "motion_logger: %s needs a build with GPIOD=1\n", UI_GPIO_OPTION);
+		result = -ENOSYS;
+		goto cleanup;
+#endif
 	}
 
 	for (i = 0; i < count; i++) {
@@ -587,13 +577,9 @@ static int run_sources(const struct options *options, struct ring_buffer *buffer
 		tasks[i].started = true;
 	}
 
-	/* Задача GPIO стоїть останньою: коли до неї дійшли, усі джерела даних уже завершились. */
 	for (i = 0; i < count; i++) {
 		if (!tasks[i].started) {
 			continue;
-		}
-		if (tasks[i].run == run_gpio_task) {
-			sources_finished = 1;
 		}
 		pthread_join(tasks[i].thread, NULL);
 		total->received += tasks[i].stats.received;
@@ -617,12 +603,11 @@ cleanup:
 	if (gps_fd >= 0) {
 		close(gps_fd);
 	}
-	if (led_fd >= 0) {
-		close(led_fd);
+#ifdef HAVE_GPIOD
+	if (ui_open) {
+		ui_driver.base.close(&ui_driver.base);
 	}
-	if (button_fd >= 0) {
-		close(button_fd);
-	}
+#endif
 
 	return result;
 }
@@ -673,6 +658,21 @@ static int run_sensor_task(struct task *task)
 	return result;
 }
 
+#ifdef HAVE_GPIOD
+/* Кнопка перемикає запис: log_writer ставиться на паузу й знімається з неї. */
+static void ui_set_recording(void *context, bool recording)
+{
+	log_writer_set_paused(context, !recording);
+}
+
+static bool ui_is_moving(void *context) { return log_writer_is_moving(context); }
+
+static int run_ui_task(struct task *task)
+{
+	return ui_controller_run(task->ui_controller, &stop_requested);
+}
+#endif /* HAVE_GPIOD */
+
 static int run_gps_task(struct task *task)
 {
 	struct gps_reader_stats stats;
@@ -682,82 +682,4 @@ static int run_gps_task(struct task *task)
 	task->stats.dropped = stats.dropped;
 
 	return result;
-}
-
-/*
- * Світлодіоди й кнопки: раз на LED_TICK_MS перераховує, що показувати (status_leds_compute), і
- * кладе в буфер запис на кожне натискання кнопки. При зупинці гасить усі світлодіоди.
- */
-static int run_gpio_task(struct task *task)
-{
-	static const unsigned int buttons[BUTTON_COUNT] = {BUTTON1_GPIO, BUTTON2_GPIO};
-	struct epoll_event event = {.events = EPOLLIN, .data.fd = task->button_fd};
-	struct status_leds off = {false, false, false};
-	struct status_leds shown = off;
-	bool first = true;
-	int epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-	int result = 0;
-
-	if (epoll_fd < 0) {
-		return -errno;
-	}
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, task->button_fd, &event) < 0) {
-		result = -errno;
-		close(epoll_fd);
-		return result;
-	}
-
-	while (!stop_requested && !sources_finished) {
-		struct device_status_snapshot snapshot;
-		struct status_leds leds;
-		int ready = epoll_wait(epoll_fd, &event, 1, LED_TICK_MS);
-
-		if (ready < 0 && errno != EINTR) {
-			result = -errno;
-			break;
-		}
-		if (ready > 0) {
-			unsigned int offset;
-			int64_t time_ms;
-			int b;
-
-			if (gpio_lines_read_event(task->button_fd, &offset, &time_ms) == 0) {
-				for (b = 0; b < BUTTON_COUNT; b++) {
-					struct sample item = {.source = SAMPLE_SOURCE_BUTTON,
-							      .time_ms = time_ms,
-							      .value = b + 1};
-
-					if (buttons[b] != offset) {
-						continue;
-					}
-					task->stats.received++;
-					if (ring_buffer_push(task->buffer, &item) != 0) {
-						task->stats.dropped++;
-					}
-				}
-			}
-		}
-
-		snapshot = device_status_snapshot(task->status);
-		leds = status_leds_compute(&snapshot, monotonic_ms());
-		if (first || leds.red != shown.red || leds.green != shown.green ||
-		    leds.blue != shown.blue) {
-			show_leds(task->led_fd, &leds);
-			shown = leds;
-			first = false;
-		}
-	}
-
-	show_leds(task->led_fd, &off);
-	close(epoll_fd);
-
-	return result;
-}
-
-static void show_leds(int led_fd, const struct status_leds *leds)
-{
-	uint64_t bits = (leds->red ? LED_RED_BIT : 0) | (leds->green ? LED_GREEN_BIT : 0) |
-			(leds->blue ? LED_BLUE_BIT : 0);
-
-	gpio_lines_set(led_fd, bits, LED_RED_BIT | LED_GREEN_BIT | LED_BLUE_BIT);
 }

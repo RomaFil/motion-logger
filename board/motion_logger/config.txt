@@ -1,5 +1,7 @@
 # Налаштування прошивки Pi 5 для Motion Logger (власний образ Buildroot)
-kernel=Image
+# Крок 4.7: прошивка запускає U-Boot, а він з boot.scr вантажить Image. Без U-Boot: kernel=Image.
+arm_64bit=1
+kernel=u-boot.bin
 disable_overscan=1
 
 # UART на GPIO14/15 (DBG1 на платі): ttyAMA0 для getty і лог самої прошивки на тих самих пінах.
@@ -17,3 +19,8 @@ dtparam=spi=on
 # SPI0 CE0, драйвери ядра IIO) і UART2 (GPIO4/5) для GPS. Оверлеї збирає і кладе в образ post-image.sh.
 dtoverlay=motion-logger-sensors
 dtoverlay=uart2-pi5
+
+# Середній світлодіод (світлодіод 2) висить на GPIO6, а GPIO0-8 після старту прошивки мають підтяжку до
+# живлення («ip» у pinctrl): крізь неї йде слабкий струм і світлодіод ледь тліє. Тримаємо лінію виходом із
+# низьким рівнем уже з прошивки, ще до запуску motion_logger.
+gpio=6=op,dl

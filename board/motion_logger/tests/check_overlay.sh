@@ -2,7 +2,7 @@
 # Перевіряє решту rootfs_overlay без плати: усі скрипти init.d і файли /etc/default (shebang, LF,
 # біт виконання, синтаксис), /etc/default/dropbear (ключі з розділу boot вимикають пароль),
 # S12mounts і S49ntp (аргументи), genimage.cfg.in (розділ data), busybox.fragment.
-# S99motion_logger і Wi-Fi перевіряють check_init_script.sh і check_wifi.sh.
+# S99motion_logger перевіряє check_init_script.sh.
 # Лише POSIX sh. Запуск: sh board/motion_logger/tests/check_overlay.sh
 set -u
 
@@ -39,7 +39,7 @@ for f in "$OVERLAY"/etc/init.d/S*; do
 	check "$name: виконуваний" test -x "$f"
 	check "$name: синтаксис sh -n" sh -n "$f"
 done
-for f in "$OVERLAY"/etc/default/* "$OVERLAY"/usr/sbin/*; do
+for f in "$OVERLAY"/etc/default/*; do
 	check "$(basename "$f"): синтаксис sh -n" sh -n "$f"
 done
 

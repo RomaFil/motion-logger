@@ -32,7 +32,6 @@ enum sample_source {
 	SAMPLE_SOURCE_ACCEL,  /**< основний акселерометр: три осі в g, з нього рахується рух */
 	SAMPLE_SOURCE_ACCEL2, /**< додатковий акселерометр: три осі в g, лише для журналу */
 	SAMPLE_SOURCE_GPS,    /**< GPS: позиція й швидкість (розібраний рядок RMC) */
-	SAMPLE_SOURCE_BUTTON, /**< натиснута кнопка на платі: номер кнопки у value */
 };
 
 /**
@@ -40,9 +39,8 @@ enum sample_source {
  *
  * Поле source каже, які з решти полів мають зміст: для SIM заповнено value, для ACCEL і ACCEL2
  * заповнено x_g, y_g, z_g, для GPS заповнено gps_fix, latitude_deg, longitude_deg, speed_knots,
- * satellites, gps_utc_s, для BUTTON заповнено value (номер кнопки, з 1). Решта полів нулі. Мітка
- * часу ставиться там, де відлік з'явився (а не в момент запису в файл), тому затримка в буфері не
- * псує час.
+ * satellites. Решта полів нулі. Мітка часу ставиться там, де відлік з'явився (а не в момент
+ * запису в файл), тому затримка в буфері не псує час.
  */
 struct sample {
 	enum sample_source source;
@@ -57,8 +55,6 @@ struct sample {
 	double speed_knots;   /**< (лише GPS, коли gps_fix) вузли */
 	int satellites; /**< (лише GPS) скільки супутників у останньому GGA, або -1, якщо ще не було
 			 */
-	int64_t gps_utc_s; /**< (лише GPS) час UTC з рядка RMC, секунди Unix; 0 чи -1: модуль
-			      ще не знає дати й часу */
 };
 
 /**
