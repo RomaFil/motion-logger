@@ -2,3 +2,18 @@
 # mkeficapsule (інструмент підпису EFI-капсул для оновлення прошивки) на хості потребує gnutls, тобто
 # ще кількох десятків хостових пакетів Buildroot; нашому образу він не потрібен.
 # CONFIG_TOOLS_MKEFICAPSULE is not set
+
+# Менше шуму на консолі (05.11.2026, лог з кабелем JST): повідомлення, які нічого не означали для нашого образу.
+#
+# Середовище U-Boot не зберігаємо: на картці нема uboot.env, і при кожному старті було
+# «Loading Environment from FAT... Unable to read "uboot.env"». Лишається середовище за замовчуванням.
+# CONFIG_ENV_IS_IN_FAT is not set
+CONFIG_ENV_IS_NOWHERE=y
+#
+# Спроба EFI boot manager (Boot0000) завжди закінчувалась «Cannot persist EFI variables without system
+# partition» і «Boot failed (err=-14)»: EFI-розділу нема. Образ вантажиться скриптом boot.scr (bootmeth script).
+# CONFIG_BOOTMETH_EFI_BOOTMGR is not set
+#
+# preboot «pci enum; usb start;»: USB Pi 5 сидить за RP1, U-Boot його не бачить («No USB controllers
+# found»), а для завантаження з SD вони не потрібні. Без preboot старт на ≈1 с швидший.
+# CONFIG_USE_PREBOOT is not set

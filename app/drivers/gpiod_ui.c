@@ -12,6 +12,7 @@
 #define CONSUMER "motion_logger"
 #define MS_PER_SECOND 1000
 #define NS_PER_MS 1000000L
+#define NS_PER_SECOND 1000000000L
 
 static int wait_press(struct ui_io *self, int timeout_ms);
 static int show(struct ui_io *self, enum ui_view view);
@@ -19,6 +20,8 @@ static void close_ui(struct ui_io *self);
 static int request_button(struct gpiod_ui *ui, unsigned int line, bool active_high);
 static int request_led(struct gpiod_ui *ui, int index, unsigned int line);
 static void release_all(struct gpiod_ui *ui);
+static int settle_and_read_level(struct gpiod_ui *ui);
+static bool time_left(const struct timespec *deadline, struct timespec *left);
 
 struct gpiod_ui_config gpiod_ui_default_config(const char *chip)
 {
@@ -41,6 +44,8 @@ int gpiod_ui_open(struct gpiod_ui *ui, const struct gpiod_ui_config *config)
 		return -EINVAL;
 	}
 	memset(ui, 0, sizeof(*ui));
+	ui->button_active_high = config->button_active_high;
+	button_filter_init(&ui->button_filter);
 	ui->base.wait_press = wait_press;
 	ui->base.show = show;
 	ui->base.close = close_ui;
@@ -76,7 +81,11 @@ fail:
 	return result;
 }
 
-/* Натисканням вважається зростання (активний високий рівень) чи спад напруги на лінії кнопки. */
+/*
+ * Підтяжка тримає лінію у стані «відпущено»: до землі для кнопки, що дає 1, і до живлення для
+ * кнопки, що замикає на землю. Події обох фронтів: за ними драйвер бачить і натискання, і
+ * відпускання, а що саме вважати натисканням, вирішує рівень лінії (див. wait_press).
+ */
 static int request_button(struct gpiod_ui *ui, unsigned int line, bool active_high)
 {
 	int flags = active_high ? GPIOD_LINE_REQUEST_FLAG_BIAS_PULL_DOWN
@@ -87,11 +96,7 @@ static int request_button(struct gpiod_ui *ui, unsigned int line, bool active_hi
 	if (ui->button == NULL) {
 		return -errno;
 	}
-	if (active_high) {
-		result = gpiod_line_request_rising_edge_events_flags(ui->button, CONSUMER, flags);
-	} else {
-		result = gpiod_line_request_falling_edge_events_flags(ui->button, CONSUMER, flags);
-	}
+	result = gpiod_line_request_both_edges_events_flags(ui->button, CONSUMER, flags);
 
 	return result < 0 ? -errno : 0;
 }
@@ -107,13 +112,18 @@ static int request_led(struct gpiod_ui *ui, int index, unsigned int line)
 	return gpiod_line_request_output(ui->led[index], CONSUMER, 0) < 0 ? -errno : 0;
 }
 
+/*
+ * Чекає натискання до timeout_ms. Кожна подія на лінії (будь-який фронт, зокрема дрижання) лише
+ * будить цикл: драйвер чекає, поки контакт заспокоїться, зчитує справжній рівень і питає фільтр, чи
+ * це перехід «відпущено → натиснуто». Так відпускання кнопки, навіть із дрижанням, нових натискань
+ * не дає.
+ */
 static int wait_press(struct ui_io *self, int timeout_ms)
 {
 	struct gpiod_ui *ui = (struct gpiod_ui *)self; /* base це перше поле */
 	struct timespec timeout = {.tv_sec = timeout_ms / MS_PER_SECOND,
 				   .tv_nsec = (timeout_ms % MS_PER_SECOND) * NS_PER_MS};
-	struct gpiod_line_event event;
-	int ready;
+	struct timespec deadline;
 
 	if (ui->button == NULL) {
 		nanosleep(&timeout,
@@ -121,18 +131,74 @@ static int wait_press(struct ui_io *self, int timeout_ms)
 		return 0;
 	}
 
-	ready = gpiod_line_event_wait(ui->button, &timeout);
-	if (ready < 0) {
-		return errno == EINTR ? 0 : -errno;
+	(void)clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += timeout.tv_sec;
+	deadline.tv_nsec += timeout.tv_nsec;
+	if (deadline.tv_nsec >= NS_PER_SECOND) {
+		deadline.tv_sec++;
+		deadline.tv_nsec -= NS_PER_SECOND;
 	}
-	if (ready == 0) {
-		return 0;
-	}
+
+	do {
+		int ready = gpiod_line_event_wait(ui->button, &timeout);
+		int level;
+
+		if (ready < 0) {
+			return errno == EINTR ? 0 : -errno;
+		}
+		if (ready == 0) {
+			return 0;
+		}
+		level = settle_and_read_level(ui);
+		if (level < 0) {
+			return level;
+		}
+		if (button_filter_update(&ui->button_filter,
+					 (level != 0) == ui->button_active_high)) {
+			return 1;
+		}
+	} while (time_left(&deadline, &timeout));
+
+	return 0;
+}
+
+/* Читає подію, чекає GPIOD_UI_BUTTON_SETTLE_MS, знімає накопичені події дрижання й повертає рівень
+ * лінії (0 чи 1). */
+static int settle_and_read_level(struct gpiod_ui *ui)
+{
+	struct gpiod_line_event event;
+	struct timespec settle = {.tv_sec = 0, .tv_nsec = GPIOD_UI_BUTTON_SETTLE_MS * NS_PER_MS};
+	struct timespec none = {.tv_sec = 0, .tv_nsec = 0};
+	int level;
+
 	if (gpiod_line_event_read(ui->button, &event) < 0) {
 		return -errno;
 	}
+	nanosleep(&settle, NULL);
+	while (gpiod_line_event_wait(ui->button, &none) > 0) {
+		if (gpiod_line_event_read(ui->button, &event) < 0) {
+			return -errno;
+		}
+	}
+	level = gpiod_line_get_value(ui->button);
 
-	return 1;
+	return level < 0 ? -errno : level;
+}
+
+/* Скільки лишилось до deadline; false, якщо час вийшов. */
+static bool time_left(const struct timespec *deadline, struct timespec *left)
+{
+	struct timespec now;
+
+	(void)clock_gettime(CLOCK_MONOTONIC, &now);
+	left->tv_sec = deadline->tv_sec - now.tv_sec;
+	left->tv_nsec = deadline->tv_nsec - now.tv_nsec;
+	if (left->tv_nsec < 0) {
+		left->tv_sec--;
+		left->tv_nsec += NS_PER_SECOND;
+	}
+
+	return left->tv_sec >= 0 && (left->tv_sec > 0 || left->tv_nsec > 0);
 }
 
 /* Один етап: горить лише його світлодіод. Пауза: горять усі три. */

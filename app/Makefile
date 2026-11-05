@@ -58,7 +58,7 @@ SRCS := main.c core/ring_buffer.c core/sample_reader.c core/sensor_reader.c core
 # заголовки на цілі (у Buildroot їх дає пакет libgpiod). Без GPIOD=1 драйвер не збирається, а --ui-gpio видає
 # зрозумілу помилку.
 ifeq ($(GPIOD),1)
-  SRCS += drivers/gpiod_ui.c
+  SRCS += drivers/gpiod_ui.c core/button_filter.c
   override CFLAGS += -DHAVE_GPIOD
   GPIOD_LIBS := -lgpiod
 endif
@@ -80,7 +80,7 @@ TEST_TARGETS := $(BUILD)/test_ring_buffer $(BUILD)/test_sample_reader $(BUILD)/t
 	$(BUILD)/test_accel_csv $(BUILD)/test_motion_events $(BUILD)/test_motion_report \
 	$(BUILD)/test_sensor_reader $(BUILD)/test_csv_player $(BUILD)/test_iio_accel \
 	$(BUILD)/test_gps_reader $(BUILD)/test_recording_ui $(BUILD)/test_ui_controller \
-	$(BUILD)/test_utc_time $(BUILD)/test_impact_detector
+	$(BUILD)/test_utc_time $(BUILD)/test_impact_detector $(BUILD)/test_button_filter
 TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader.o \
 	$(BUILD)/tests/test_log_writer.o $(BUILD)/core/ring_buffer.o $(BUILD)/core/sample_reader.o \
 	$(BUILD)/core/log_writer.o $(BUILD)/core/io_util.o $(BUILD)/tests/test_nmea.o $(BUILD)/core/nmea.o \
@@ -97,6 +97,7 @@ TEST_OBJS := $(BUILD)/tests/test_ring_buffer.o $(BUILD)/tests/test_sample_reader
 	$(BUILD)/tests/test_ui_controller.o $(BUILD)/core/ui_controller.o \
 	$(BUILD)/tests/test_utc_time.o $(BUILD)/core/utc_time.o \
 	$(BUILD)/tests/test_impact_detector.o $(BUILD)/core/impact_detector.o \
+	$(BUILD)/tests/test_button_filter.o $(BUILD)/core/button_filter.o \
 	$(ANALYZE_OBJS)
 
 DEPS := $(OBJS:.o=.d) $(SIM_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
@@ -159,6 +160,9 @@ $(BUILD)/test_ui_controller: $(BUILD)/tests/test_ui_controller.o $(BUILD)/core/u
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_utc_time: $(BUILD)/tests/test_utc_time.o $(BUILD)/core/utc_time.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test_button_filter: $(BUILD)/tests/test_button_filter.o $(BUILD)/core/button_filter.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test_impact_detector: $(BUILD)/tests/test_impact_detector.o $(BUILD)/core/impact_detector.o
@@ -264,6 +268,10 @@ $(BUILD)/test_log_writer_tsan: tests/test_log_writer.c tests/check.h core/log_wr
 	$(CC) $(TSAN_FLAGS) -o $@ tests/test_log_writer.c core/log_writer.c core/io_util.c \
 		core/ring_buffer.c core/motion_report.c core/motion_events.c core/motion_filter.c core/utc_time.c \
 		core/impact_detector.c -lm
+
+$(BUILD)/test_button_filter_tsan: tests/test_button_filter.c tests/check.h core/button_filter.c core/button_filter.h
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_FLAGS) -o $@ tests/test_button_filter.c core/button_filter.c
 
 $(BUILD)/test_utc_time_tsan: tests/test_utc_time.c tests/check.h core/utc_time.c core/utc_time.h
 	@mkdir -p $(@D)
