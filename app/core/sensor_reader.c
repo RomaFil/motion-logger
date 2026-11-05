@@ -28,7 +28,7 @@ int sensor_reader_run(struct sensor *sensor, enum sample_source source, struct r
 	memset(stats, 0, sizeof(*stats));
 
 	while (!*stop) {
-		struct accel_sample accel;
+		struct accel_sample accel = {0}; /* драйвер може не заповнити необов'язкові поля */
 		struct sample item;
 		int result = sensor->read(sensor, &accel);
 
@@ -83,7 +83,9 @@ static struct sample make_accel_sample(const struct accel_sample *accel, enum sa
 			      .time_ms = accel->time_ms,
 			      .x_g = accel->x_g,
 			      .y_g = accel->y_g,
-			      .z_g = accel->z_g};
+			      .z_g = accel->z_g,
+			      .has_temperature = accel->has_temperature,
+			      .temperature_c = accel->temperature_c};
 
 	return item;
 }

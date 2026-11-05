@@ -30,9 +30,13 @@
 
 /** @brief Стан драйвера. Поля змінюй лише через функції iio_accel_*. */
 struct iio_accel {
-	struct sensor base;    /**< ПЕРШЕ поле: покажчик на нього це покажчик на драйвер */
-	int raw_fd[3];	       /**< відкриті файли in_accel_{x,y,z}_raw */
-	double g_per_count[3]; /**< множник raw -> g для кожної осі */
+	struct sensor base; /**< ПЕРШЕ поле: покажчик на нього це покажчик на драйвер */
+	int raw_fd[3];	    /**< відкриті файли in_accel_{x,y,z}_raw */
+	double
+	    unit_per_count[3]; /**< множник raw -> g (акселерометр) чи град/с (гіроскоп) для осі */
+	int temp_fd;	       /**< in_temp_raw, або -1, якщо температури нема (лише гіроскоп) */
+	double temp_scale;     /**< множник температури: мілі-°C на одиницю raw */
+	double temp_offset;    /**< зсув температури в одиницях raw */
 	int64_t period_ms;
 	int64_t next_ms; /**< момент наступного відліку, 0 до першого виклику read */
 };
@@ -69,5 +73,15 @@ int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int r
  *         -ENAMETOOLONG, якщо шлях не влазить; інакше мінус errno відкриття каталогу
  */
 int iio_accel_find(const char *devices_dir, const char *name, char *out, size_t size);
+
+/**
+ * @brief Те саме для гіроскопа того самого пристрою: in_anglvel_{x,y,z}_raw і in_anglvel_scale.
+ *
+ * Масштаб IIO у рад/с на одиницю, драйвер віддає градуси за секунду в полях x_g, y_g, z_g
+ * (ім'я поля історичне). Якщо є in_temp_raw, у кожен відлік додається температура:
+ * T[мілі-°C] = (raw + in_temp_offset) * in_temp_scale; відсутня температура не помилка.
+ * Параметри й коди помилок ті самі, що в iio_accel_open().
+ */
+int iio_accel_open_gyro(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz);
 
 #endif /* IIO_ACCEL_H */

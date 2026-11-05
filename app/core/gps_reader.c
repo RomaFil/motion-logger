@@ -12,6 +12,7 @@
 
 #include "io_util.h"
 #include "nmea_parser.h"
+#include "utc_time.h"
 
 /* Як часто прокидаємось перевірити прапорець зупинки, якщо даних нема. */
 #define POLL_TIMEOUT_MS 100
@@ -29,7 +30,9 @@ struct line_assembler {
 /* Усе, що читач пам'ятає між викликами read(). */
 struct reader_state {
 	struct line_assembler line;
-	int satellites; /* з останнього GGA, або SATELLITES_UNKNOWN */
+	int satellites;	     /* з останнього GGA, або SATELLITES_UNKNOWN */
+	struct nmea_fix gga; /* останній розібраний GGA: висота й HDOP */
+	bool has_gga;
 	/* Для термінала (послідовного порту) read() == 0 означає «даних зараз нема», а не кінець:
 	 * порт налаштовано з VMIN = 0, VTIME = 0. Кінець даних буває лише в каналу чи файлу. */
 	bool zero_read_is_eof;
@@ -43,8 +46,8 @@ static void feed_byte(char byte, struct ring_buffer *rb, struct reader_state *st
 		      struct gps_reader_stats *stats);
 static void handle_line(const char *line, struct ring_buffer *rb, struct reader_state *state,
 			struct gps_reader_stats *stats);
-static void store_gps_sample(const struct nmea_fix *fix, int satellites, struct ring_buffer *rb,
-			     struct gps_reader_stats *stats);
+static void store_gps_sample(const struct nmea_fix *fix, const struct reader_state *state,
+			     struct ring_buffer *rb, struct gps_reader_stats *stats);
 
 int gps_reader_run(int source_fd, struct ring_buffer *rb, const volatile sig_atomic_t *stop,
 		   struct gps_reader_stats *stats)
@@ -171,7 +174,7 @@ static void handle_line(const char *line, struct ring_buffer *rb, struct reader_
 
 	result = nmea_parse_rmc(line, &fix);
 	if (result == 0) {
-		store_gps_sample(&fix, state->satellites, rb, stats);
+		store_gps_sample(&fix, state, rb, stats);
 		return;
 	}
 	if (result == -ENOMSG) {
@@ -179,6 +182,8 @@ static void handle_line(const char *line, struct ring_buffer *rb, struct reader_
 		if (result == 0) {
 			state->satellites =
 			    fix.has_satellites ? (int)fix.satellites : SATELLITES_UNKNOWN;
+			state->gga = fix;
+			state->has_gga = true;
 			return;
 		}
 		if (result == -ENOMSG) {
@@ -193,18 +198,33 @@ static void handle_line(const char *line, struct ring_buffer *rb, struct reader_
 	}
 }
 
-static void store_gps_sample(const struct nmea_fix *fix, int satellites, struct ring_buffer *rb,
-			     struct gps_reader_stats *stats)
+static void store_gps_sample(const struct nmea_fix *fix, const struct reader_state *state,
+			     struct ring_buffer *rb, struct gps_reader_stats *stats)
 {
 	struct sample item = {.source = SAMPLE_SOURCE_GPS,
 			      .time_ms = monotonic_ms(),
 			      .gps_fix = fix->valid && fix->has_position,
-			      .satellites = satellites};
+			      .satellites = state->satellites};
 
 	if (item.gps_fix) {
 		item.latitude_deg = fix->latitude_degrees;
 		item.longitude_deg = fix->longitude_degrees;
 		item.speed_knots = fix->has_speed ? fix->speed_knots : 0.0;
+		/* Час і дату довіряємо лише з дійсним статусом A: до фіксації модуль може віддавати
+		 * час зі своєї пам’яті, а не з супутників. */
+		if (fix->has_time && fix->has_date) {
+			item.has_utc = true;
+			item.utc_epoch_s =
+			    utc_time_to_epoch(fix->year, fix->month, fix->day, fix->seconds_of_day);
+		}
+		item.has_course = fix->has_course;
+		item.course_deg = fix->course_degrees;
+		if (state->has_gga) {
+			item.has_altitude = state->gga.has_altitude;
+			item.altitude_m = state->gga.altitude_m;
+			item.has_hdop = state->gga.has_hdop;
+			item.hdop = state->gga.hdop;
+		}
 	}
 
 	stats->samples++;

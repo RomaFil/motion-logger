@@ -14,12 +14,25 @@
  *     {"t_ms":40550,"src":"accel","event":"MOVE_STOP"}
  *     {"t_ms":21000,"src":"accel","second":20,"moving":true,"avg_dev_g":0.2105}
  *
+ *   програмні події за модулем прискорення (|a| = sqrt(x² + y² + z²), у спокої близько 1 g):
+ *     {"t_ms":5100,"src":"accel","event":"FREE_FALL","duration_ms":100}  невагомість від 100 мс
+ *     {"t_ms":5400,"src":"accel","event":"IMPACT","magnitude_g":4.5000}   удар від 2,5 g
+ *   Апаратні переривання датчиків на платі не підключені, тому рахуємо в програмі
+ * (impact_detector.h).
+ *
  *   додатковий акселерометр (SAMPLE_SOURCE_ACCEL2), не частіше одного рядка на секунду:
  *     {"t_ms":21000,"src":"accel2","x_g":0.0123,"y_g":-0.0042,"z_g":0.9987}
+ *
+ *   гіроскоп MPU6050 (SAMPLE_SOURCE_GYRO), не частіше одного рядка на секунду; температура датчика
+ *   лише коли драйвер ядра її віддає:
+ *     {"t_ms":21000,"src":"gyro","x_dps":0.12,"y_dps":-0.30,"z_dps":0.05,"temp_c":31.4}
  *
  *   GPS (SAMPLE_SOURCE_GPS), по рядку на кожен рядок RMC від модуля (раз на секунду):
  *     {"t_ms":21000,"src":"gps","fix":true,"lat":50.450100,"lon":30.523400,"speed_knots":0.30,"sats":8}
  *     {"t_ms":3000,"src":"gps","fix":false,"sats":0}
+ *   Після основних полів, лише коли відомі й лише з фіксацією, йдуть необов'язкові (порядок
+ * сталий): "utc":"2026-10-28T12:00:08Z" (дата й час з супутників), "alt_m":180.0 (висота над рівнем
+ *     моря), "course_deg":90.0 (курс), "hdop":1.2 (розкид: до 2 добре, понад 5 погано)
  *   без фіксації координат нема взагалі (нульову широту не можна приймати за реальну точку);
  *   sats дорівнює null, якщо рядка GGA ще не було.
  *
@@ -53,6 +66,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "impact_detector.h"
 #include "motion_events.h"
 #include "motion_report.h"
 #include "ring_buffer.h"
@@ -61,7 +75,7 @@
 #define LOG_WRITER_SOURCE_SIZE 16
 
 /** @brief Найбільша довжина одного рядка логу разом із завершальним нулем. */
-#define LOG_WRITER_LINE_SIZE 192
+#define LOG_WRITER_LINE_SIZE 256
 
 /** @brief Найбільша довжина шляху до лог-файлу разом із завершальним нулем. */
 #define LOG_WRITER_PATH_SIZE 256
@@ -81,7 +95,9 @@ struct log_writer_stats {
 	size_t events;	  /**< з них скільки рядків-подій руху */
 	size_t rows;	  /**< з них скільки підсумків секунди основного акселерометра */
 	size_t aux;	  /**< з них скільки рядків додаткового акселерометра */
+	size_t gyro;	  /**< з них скільки рядків гіроскопа */
 	size_t gps;	  /**< з них скільки рядків GPS */
+	size_t impacts;	  /**< з них скільки рядків FREE_FALL і IMPACT (входять і в events) */
 	size_t failed;	  /**< скільки записів не вдалося обробити чи записати */
 	size_t paused;	  /**< скільки записів відкинуто, поки запис був на паузі (не помилка) */
 	size_t rotations; /**< скільки разів лог-файл ротувався */
@@ -107,8 +123,11 @@ struct log_writer_options {
 struct log_writer {
 	struct ring_buffer *source_buffer;
 	struct motion_report detector;
-	int64_t last_aux_ms; /**< мітка часу останнього записаного рядка accel2 */
-	bool aux_seen;	     /**< чи писали вже рядок accel2 */
+	struct impact_detector impact_detector;
+	int64_t last_aux_ms;  /**< мітка часу останнього записаного рядка accel2 */
+	int64_t last_gyro_ms; /**< мітка часу останнього записаного рядка gyro */
+	bool gyro_seen;	      /**< чи писали вже рядок gyro */
+	bool aux_seen;	      /**< чи писали вже рядок accel2 */
 	int fd;
 	int raw_fd; /**< файл сирих відліків, або -1 */
 	char path[LOG_WRITER_PATH_SIZE];
@@ -155,6 +174,15 @@ int log_writer_format_line(char *out, size_t size, const char *source, int64_t t
 int log_writer_format_event(char *out, size_t size, int64_t timestamp_ms, enum motion_event event);
 
 /**
+ * @brief Складає рядок події FREE_FALL чи IMPACT.
+ *
+ * @return довжина рядка без завершального нуля; -EINVAL, якщо out чи event NULL, kind не подія
+ *         або |a| не скінченне число; -ENOSPC, якщо рядок не влізає в size
+ */
+int log_writer_format_impact(char *out, size_t size, int64_t timestamp_ms,
+			     const struct impact_event *event);
+
+/**
  * @brief Складає рядок-підсумок секунди основного акселерометра.
  *
  * @param out          куди писати
@@ -175,6 +203,14 @@ int log_writer_format_row(char *out, size_t size, int64_t timestamp_ms,
  */
 int log_writer_format_aux(char *out, size_t size, int64_t timestamp_ms, double x_g, double y_g,
 			  double z_g);
+
+/**
+ * @brief Складає рядок гіроскопа (град/с) з необов'язковою температурою.
+ *
+ * @return довжина рядка без завершального нуля; -EINVAL, якщо out чи sample NULL, source не
+ *         GYRO або будь-яке число не скінченне; -ENOSPC, якщо рядок не влізає в size
+ */
+int log_writer_format_gyro(char *out, size_t size, const struct sample *sample);
 
 /**
  * @brief Складає рядок GPS з запису SAMPLE_SOURCE_GPS.

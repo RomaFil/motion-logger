@@ -69,8 +69,10 @@ static void make_device(char *dir, const char *x, const char *y, const char *z)
 static void remove_device(const char *dir)
 {
 	static const char *const names[] = {
-	    "in_accel_x_raw",	"in_accel_y_raw",   "in_accel_z_raw",  "in_accel_scale",
-	    "in_accel_x_scale", "in_accel_y_scale", "in_accel_z_scale"};
+	    "in_accel_x_raw",	"in_accel_y_raw",   "in_accel_z_raw",	"in_accel_scale",
+	    "in_accel_x_scale", "in_accel_y_scale", "in_accel_z_scale", "in_anglvel_x_raw",
+	    "in_anglvel_y_raw", "in_anglvel_z_raw", "in_anglvel_scale", "in_temp_raw",
+	    "in_temp_scale",	"in_temp_offset"};
 	size_t i;
 
 	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -320,10 +322,142 @@ static void test_find_reports_ambiguous_name(void)
 	remove_devices_dir(base, 2);
 }
 
+/* Каталог гіроскопа: масштаб 0,0174532925 рад/с на одиницю = рівно 1 град/с на одиницю raw. */
+#define ONE_DEGREE_PER_COUNT "0.017453292519943295\n"
+
+static void make_gyro_device(char *dir, const char *x, const char *y, const char *z)
+{
+	strcpy(dir, TEMP_TEMPLATE);
+	CHECK(mkdtemp(dir) != NULL);
+	write_file(dir, "in_anglvel_x_raw", x);
+	write_file(dir, "in_anglvel_y_raw", y);
+	write_file(dir, "in_anglvel_z_raw", z);
+	write_file(dir, "in_anglvel_scale", ONE_DEGREE_PER_COUNT);
+}
+
+/* Гіроскоп: рад/с з масштабу переводяться в град/с; температури нема, і це не помилка. */
+static void test_gyro_is_converted_to_degrees_per_second(void)
+{
+	char dir[sizeof(TEMP_TEMPLATE)];
+	struct iio_accel dev;
+	struct accel_sample sample;
+
+	make_gyro_device(dir, "10\n", "-20\n", "0\n");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == 0);
+
+	CHECK(dev.base.read(&dev.base, &sample) == 0);
+	CHECK(fabs(sample.x_g - 10.0) < 1e-6);
+	CHECK(fabs(sample.y_g + 20.0) < 1e-6);
+	CHECK(fabs(sample.z_g) < 1e-6);
+	CHECK(!sample.has_temperature);
+
+	dev.base.close(&dev.base);
+	remove_device(dir);
+}
+
+/* Температура: T[мілі-°C] = (raw + offset) * scale; тут (5 + 20) * 1000 / 1000 = 25 °C. */
+static void test_gyro_reports_temperature(void)
+{
+	char dir[sizeof(TEMP_TEMPLATE)];
+	struct iio_accel dev;
+	struct accel_sample sample;
+
+	make_gyro_device(dir, "0\n", "0\n", "0\n");
+	write_file(dir, "in_temp_raw", "5\n");
+	write_file(dir, "in_temp_scale", "1000\n");
+	write_file(dir, "in_temp_offset", "20\n");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == 0);
+
+	CHECK(dev.base.read(&dev.base, &sample) == 0);
+	CHECK(sample.has_temperature);
+	CHECK(fabs(sample.temperature_c - 25.0) < 1e-9);
+
+	write_file(dir, "in_temp_raw", "-30\n"); /* нове значення читається при кожному відліку */
+	CHECK(dev.base.read(&dev.base, &sample) == 0);
+	CHECK(fabs(sample.temperature_c + 10.0) < 1e-9);
+
+	dev.base.close(&dev.base);
+	remove_device(dir);
+}
+
+/* Зсув температури необов'язковий (нуль), масштаб обов'язковий і додатний. */
+static void test_gyro_temperature_offset_optional_and_scale_required(void)
+{
+	char dir[sizeof(TEMP_TEMPLATE)];
+	struct iio_accel dev;
+	struct accel_sample sample;
+
+	make_gyro_device(dir, "0\n", "0\n", "0\n");
+	write_file(dir, "in_temp_raw", "25\n");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == -ENOENT); /* є raw, нема масштабу */
+
+	write_file(dir, "in_temp_scale", "0\n");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == -EPROTO);
+
+	write_file(dir, "in_temp_scale", "1000\n");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == 0); /* зсуву нема: нуль */
+	CHECK(dev.base.read(&dev.base, &sample) == 0);
+	CHECK(fabs(sample.temperature_c - 25.0) < 1e-9);
+
+	dev.base.close(&dev.base);
+	remove_device(dir);
+}
+
+/* Акселерометр і гіроскоп в одному каталозі не заважають один одному, акселерометр без температури.
+ */
+static void test_accel_and_gyro_share_one_device_dir(void)
+{
+	char dir[sizeof(TEMP_TEMPLATE)];
+	struct iio_accel accel;
+	struct iio_accel gyro;
+	struct accel_sample sample;
+
+	make_device(dir, "0\n", "0\n", "1\n");
+	write_file(dir, "in_anglvel_x_raw", "3\n");
+	write_file(dir, "in_anglvel_y_raw", "0\n");
+	write_file(dir, "in_anglvel_z_raw", "0\n");
+	write_file(dir, "in_anglvel_scale", ONE_DEGREE_PER_COUNT);
+	write_file(dir, "in_temp_raw", "5\n");
+	write_file(dir, "in_temp_scale", "1000\n");
+
+	CHECK(iio_accel_open(&accel, dir, RATE_HZ) == 0);
+	CHECK(iio_accel_open_gyro(&gyro, dir, RATE_HZ) == 0);
+	CHECK(accel.base.read(&accel.base, &sample) == 0);
+	CHECK(fabs(sample.z_g - 1.0) < EPSILON);
+	CHECK(!sample.has_temperature); /* температуру віддає лише гіроскоп */
+	CHECK(gyro.base.read(&gyro.base, &sample) == 0);
+	CHECK(fabs(sample.x_g - 3.0) < 1e-6);
+	CHECK(sample.has_temperature);
+
+	accel.base.close(&accel.base);
+	gyro.base.close(&gyro.base);
+	remove_device(dir);
+}
+
+static void test_gyro_open_reports_missing_files_and_bad_scale(void)
+{
+	char dir[sizeof(TEMP_TEMPLATE)];
+	struct iio_accel dev;
+
+	make_gyro_device(dir, "0\n", "0\n", "0\n");
+	remove_file(dir, "in_anglvel_z_raw");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == -ENOENT);
+
+	write_file(dir, "in_anglvel_z_raw", "0\n");
+	write_file(dir, "in_anglvel_scale", "-1\n");
+	CHECK(iio_accel_open_gyro(&dev, dir, RATE_HZ) == -EPROTO);
+	remove_device(dir);
+}
+
 int main(void)
 {
 	test_find_by_name();
 	test_find_reports_ambiguous_name();
+	test_gyro_is_converted_to_degrees_per_second();
+	test_gyro_reports_temperature();
+	test_gyro_temperature_offset_optional_and_scale_required();
+	test_accel_and_gyro_share_one_device_dir();
+	test_gyro_open_reports_missing_files_and_bad_scale();
 	test_open_rejects_bad_arguments();
 	test_open_reports_missing_device();
 	test_samples_are_converted_to_g();

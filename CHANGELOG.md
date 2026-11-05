@@ -17,6 +17,9 @@
   - Застосунок: збій шини датчика пропускає відлік (`read errors`), зупинка лише після 500 збоїв підряд; потік GPS не
     завершується від `read() == 0` на послідовному порту; `fdatasync` раз на 5 с; лог `0600`; рядок
     `"src":"log","event":"open"` з `boot_id`; `--iio mpu6050` за іменем.
+  - Злиття `feature/telemetry`: GPS-поля `utc`, `alt_m`, `course_deg`, `hdop`, події `FREE_FALL`/`IMPACT`, гіроскоп і
+    температура (`--iio-gyro`, в автозапуску `--iio-gyro @mpu6050`). Виправлено `MAX_TASKS` 4 → 5: кожна гілка мала 4
+    задачі, а разом з кнопкою, ADXL345, гіроскопом і GPS їх 5 (масив задач переповнився б).
   Після збірки перевірити: `mount | grep -E '/boot|/data'`, `head -n 1 /data/motion.jsonl` (рядок `log`),
   `S99motion_logger status`, `kill -9` програми й повторний `status` (перезапуск), `ls /dev/watchdog`, `date` після
   підключення Wi-Fi.
@@ -61,6 +64,10 @@
 
 - **Застосунок:** кнопка і RGB-світлодіод (`--ui-gpio`, крок 5.4): пауза запису, колір за станом; `log_writer_set_paused()` і `log_writer_is_moving()`; драйвер `drivers/gpiod_ui` на libgpiod 1.x, збирається з `GPIOD=1`.
 - **Образ:** пакет `motion_logger` залежить від `libgpiod` і збирається з `GPIOD=1`. Не збиралось у Buildroot.
+
+## 29.10.2026 (гілка feature/telemetry, ще не злита в main)
+
+- **Застосунок:** GPS додає в лог час UTC, висоту, курс і HDOP (`core/utc_time`, розбір RMC/GGA); програмні події `FREE_FALL` і `IMPACT` (`core/impact_detector`); гіроскоп і температура MPU6050 (`--iio-gyro`, рядок `gyro` раз на секунду). Старі поля рядків не змінились, нові йдуть після них.
 
 ## 29.10.2026
 

@@ -23,5 +23,7 @@
 # Інші джерела (див. README, розділи «Імітатор датчика» і «Програвач запису акселерометра»), наприклад:
 #   MOTION_LOGGER_OPTS="--replay /root/accel_sample.csv --speed 1 --log /var/log/motion.jsonl"
 # Без жодного джерела програма нічого не читає й одразу завершується.
+#
+# --iio-gyro @mpu6050: гіроскоп і температура того самого MPU6050, раз на секунду (крок 5.7).
 MOTION_LOGGER_IIO_RATES="mpu6050:100"
-MOTION_LOGGER_OPTS="--iio @mpu6050 --iio-rate 100 --iio-aux @adxl345 --gps /dev/ttyAMA2 --log /data/motion.jsonl --log-max-mb 50 --log-keep 10 --ui-gpio gpiochip0"
+MOTION_LOGGER_OPTS="--iio @mpu6050 --iio-rate 100 --iio-aux @adxl345 --iio-gyro @mpu6050 --gps /dev/ttyAMA2 --log /data/motion.jsonl --log-max-mb 50 --log-keep 10 --ui-gpio gpiochip0"

@@ -580,6 +580,62 @@ static void test_format_gps_produces_exact_json(void)
 	CHECK(strstr(line, "\"lat\":-33.868800,\"lon\":-70.669300") != NULL);
 }
 
+/* Додаткові поля йдуть після основних і лише відомі; без UTC чи висоти їх у рядку нема. */
+static void test_format_gps_with_optional_fields(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gps_item(21000, true, 8);
+
+	item.has_utc = true;
+	item.utc_epoch_s = 1793188808; /* 2026-10-28T12:00:08Z */
+	item.has_altitude = true;
+	item.altitude_m = 180.04;
+	item.has_course = true;
+	item.course_deg = 90.0;
+	item.has_hdop = true;
+	item.hdop = 1.2;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gps\",\"fix\":true,\"lat\":50.450100,"
+			   "\"lon\":30.523400,\"speed_knots\":0.30,\"sats\":8,"
+			   "\"utc\":\"2026-10-28T12:00:08Z\",\"alt_m\":180.0,\"course_deg\":90.0,"
+			   "\"hdop\":1.20}\n") == 0);
+
+	/* Лише висота: решта необов'язкових полів не з'являється. */
+	item.has_utc = false;
+	item.has_course = false;
+	item.has_hdop = false;
+	item.altitude_m = -12.5;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(strstr(line, "\"sats\":8,\"alt_m\":-12.5}\n") != NULL);
+	CHECK(strstr(line, "utc") == NULL && strstr(line, "hdop") == NULL);
+}
+
+/* Найдовший можливий рядок GPS вміщається в LOG_WRITER_LINE_SIZE, а в малий буфер не лізе. */
+static void test_format_gps_longest_line_fits(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[64];
+	struct sample item = make_gps_item(INT64_C(9999999999999), true, 12);
+
+	item.latitude_deg = -89.999999;
+	item.longitude_deg = -179.999999;
+	item.speed_knots = 999.99;
+	item.has_utc = true;
+	item.utc_epoch_s = 4102444799LL;
+	item.has_altitude = true;
+	item.altitude_m = -9999.9;
+	item.has_course = true;
+	item.course_deg = 359.9;
+	item.has_hdop = true;
+	item.hdop = 99.99;
+
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) > 0);
+	CHECK(log_writer_format_gps(tiny, sizeof(tiny), &item) == -ENOSPC);
+
+	item.altitude_m = NAN;
+	CHECK(log_writer_format_gps(line, sizeof(line), &item) == -EINVAL);
+}
+
 /* Без фіксації координат у рядку нема зовсім; невідома кількість супутників це null, а не 0. */
 static void test_format_gps_without_fix_has_no_coordinates(void)
 {
@@ -1019,6 +1075,83 @@ static void test_rotation_keeps_limited_number_of_files(void)
 	unlink(path);
 }
 
+static void test_format_impact_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct impact_event fall = {.kind = IMPACT_EVENT_FREE_FALL, .duration_ms = 120};
+	struct impact_event hit = {.kind = IMPACT_EVENT_IMPACT, .magnitude_g = 4.5};
+
+	CHECK(log_writer_format_impact(line, sizeof(line), 5100, &fall) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":5100,\"src\":\"accel\",\"event\":\"FREE_FALL\","
+			   "\"duration_ms\":120}\n") == 0);
+	CHECK(log_writer_format_impact(line, sizeof(line), 5400, &hit) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":5400,\"src\":\"accel\",\"event\":\"IMPACT\","
+			   "\"magnitude_g\":4.5000}\n") == 0);
+}
+
+static void test_format_impact_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+	struct impact_event none = {.kind = IMPACT_EVENT_NONE};
+	struct impact_event hit = {.kind = IMPACT_EVENT_IMPACT, .magnitude_g = 3.0};
+
+	CHECK(log_writer_format_impact(NULL, sizeof(line), 0, &hit) == -EINVAL);
+	CHECK(log_writer_format_impact(line, sizeof(line), 0, NULL) == -EINVAL);
+	CHECK(log_writer_format_impact(line, sizeof(line), 0, &none) == -EINVAL);
+	CHECK(log_writer_format_impact(tiny, sizeof(tiny), 0, &hit) == -ENOSPC);
+	hit.magnitude_g = NAN;
+	CHECK(log_writer_format_impact(line, sizeof(line), 0, &hit) == -EINVAL);
+}
+
+/* Наскрізно: спокій, падіння 300 мс (0 g), удар 4 g дають у лозі FREE_FALL, потім IMPACT. */
+static void test_fall_and_impact_reach_the_log(void)
+{
+	static struct sample storage[SMALL_CAPACITY * 64];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	struct sample item;
+	char path[TEMP_PATH_SIZE];
+	char text[4096] = {0};
+	size_t used = 0;
+	FILE *file;
+	int64_t time_ms = 0;
+	int i;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	for (i = 0; i < 100; i++, time_ms += MS_PER_SAMPLE) { /* 1 с спокою */
+		item = make_accel_item(time_ms, 0.0, 0.0, 1.0);
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+	for (i = 0; i < 30; i++, time_ms += MS_PER_SAMPLE) { /* 300 мс невагомості */
+		item = make_accel_item(time_ms, 0.0, 0.0, 0.0);
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+	item = make_accel_item(time_ms, 0.0, 0.0, 4.0); /* удар */
+	CHECK(ring_buffer_push(&rb, &item) == 0);
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+	CHECK(stats.impacts == 2);
+	CHECK(stats.failed == 0);
+
+	file = fopen(path, "r");
+	CHECK(file != NULL);
+	if (file != NULL) {
+		used = fread(text, 1, sizeof(text) - 1, file);
+		fclose(file);
+	}
+	text[used] = '\0';
+	CHECK(strstr(text, "\"event\":\"FREE_FALL\",\"duration_ms\":100}") != NULL);
+	CHECK(strstr(text, "\"event\":\"IMPACT\",\"magnitude_g\":4.0000}") != NULL);
+	CHECK(strstr(text, "FREE_FALL") < strstr(text, "IMPACT")); /* падіння раніше за удар */
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 static void test_rotation_rejects_bad_arguments(void)
 {
 	struct sample storage[SMALL_CAPACITY];
@@ -1040,6 +1173,83 @@ static void test_rotation_rejects_bad_arguments(void)
 	ring_buffer_destroy(&rb);
 }
 
+static struct sample make_gyro_item(int64_t time_ms, double x_dps, bool has_temperature,
+				    double temperature_c)
+{
+	struct sample item = {.source = SAMPLE_SOURCE_GYRO,
+			      .time_ms = time_ms,
+			      .x_g = x_dps,
+			      .y_g = -0.3,
+			      .z_g = 0.05,
+			      .has_temperature = has_temperature,
+			      .temperature_c = temperature_c};
+
+	return item;
+}
+
+static void test_format_gyro_produces_exact_json(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	struct sample item = make_gyro_item(21000, 0.124, true, 31.44);
+
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gyro\",\"x_dps\":0.12,\"y_dps\":-0.30,"
+			   "\"z_dps\":0.05,\"temp_c\":31.4}\n") == 0);
+
+	/* Без температури поля temp_c у рядку нема. */
+	item.has_temperature = false;
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) > 0);
+	CHECK(strcmp(line, "{\"t_ms\":21000,\"src\":\"gyro\",\"x_dps\":0.12,\"y_dps\":-0.30,"
+			   "\"z_dps\":0.05}\n") == 0);
+}
+
+static void test_format_gyro_rejects_bad_input(void)
+{
+	char line[LOG_WRITER_LINE_SIZE];
+	char tiny[8];
+	struct sample item = make_gyro_item(0, 1.0, true, 25.0);
+	struct sample not_gyro = make_sim_sample(1);
+
+	CHECK(log_writer_format_gyro(NULL, sizeof(line), &item) == -EINVAL);
+	CHECK(log_writer_format_gyro(line, sizeof(line), NULL) == -EINVAL);
+	CHECK(log_writer_format_gyro(line, sizeof(line), &not_gyro) == -EINVAL);
+	CHECK(log_writer_format_gyro(tiny, sizeof(tiny), &item) == -ENOSPC);
+	item.x_g = NAN;
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) == -EINVAL);
+	item.x_g = 1.0;
+	item.temperature_c = INFINITY;
+	CHECK(log_writer_format_gyro(line, sizeof(line), &item) == -EINVAL);
+}
+
+/* Гіроскоп на 100 Гц дає в лог не більше рядка на секунду, перший відлік одразу. */
+static void test_gyro_samples_are_written_once_per_second(void)
+{
+	struct sample storage[ACCEL_RATE_HZ * 3];
+	struct ring_buffer rb;
+	struct log_writer lw;
+	struct log_writer_stats stats;
+	char path[TEMP_PATH_SIZE];
+	int64_t time_ms;
+
+	make_temp_path(path);
+	CHECK(ring_buffer_init(&rb, storage, sizeof(storage) / sizeof(storage[0])) == 0);
+	for (time_ms = 0; time_ms < 2500; time_ms += MS_PER_SAMPLE) {
+		struct sample item = make_gyro_item(time_ms, 1.0, true, 30.0);
+
+		CHECK(ring_buffer_push(&rb, &item) == 0);
+	}
+
+	CHECK(log_writer_start(&lw, &rb, path) == 0);
+	CHECK(log_writer_stop(&lw, &stats) == 0);
+
+	CHECK(stats.gyro == 3); /* t = 0, 1000, 2000 */
+	CHECK(stats.written == 3);
+	CHECK(stats.failed == 0);
+
+	ring_buffer_destroy(&rb);
+	unlink(path);
+}
+
 int main(void)
 {
 	test_format_open_produces_exact_json();
@@ -1049,6 +1259,9 @@ int main(void)
 	test_rotation_rejects_bad_arguments();
 	test_raw_dump_has_every_accel_sample();
 	test_raw_dump_reports_unwritable_path();
+	test_format_gyro_produces_exact_json();
+	test_format_gyro_rejects_bad_input();
+	test_gyro_samples_are_written_once_per_second();
 	test_format_line_produces_exact_json();
 	test_format_line_rejects_bad_input();
 	test_format_event_produces_exact_json();
@@ -1068,12 +1281,17 @@ int main(void)
 	test_format_aux_rejects_bad_input();
 	test_format_gps_produces_exact_json();
 	test_format_gps_without_fix_has_no_coordinates();
+	test_format_gps_with_optional_fields();
+	test_format_gps_longest_line_fits();
 	test_format_gps_rejects_bad_input();
 	test_aux_samples_are_written_once_per_second();
 	test_gps_samples_are_written_in_order();
 	test_unknown_source_counts_as_failed();
 	test_paused_samples_are_dropped_and_counted();
 	test_moving_flag_follows_events_and_resets_after_pause();
+	test_format_impact_produces_exact_json();
+	test_format_impact_rejects_bad_input();
+	test_fall_and_impact_reach_the_log();
 
 	if (failures != 0) {
 		printf("%d check(s) failed\n", failures);

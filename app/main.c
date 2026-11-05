@@ -11,6 +11,8 @@
  *                          /sys/bus/iio/devices/iio:device0, або ім'я драйвера (mpu6050)
  * Додаткові джерела (можна разом з основним і між собою):
  *   --iio-aux <пристрій> другий акселерометр (ADXL345), у лог раз на секунду
+ *   --iio-gyro <пристрій> гіроскоп і температура MPU6050 (той самий пристрій, що й --iio), раз на
+ * секунду
  *   --iio-rate <Гц>      частота опитування IIO, 1..1000 (за замовчуванням 100)
  *   --gps <порт>         GPS по послідовному порту, наприклад /dev/ttyAMA2
  *   --gps-baud <бод>     швидкість порту (за замовчуванням 9600)
@@ -59,13 +61,15 @@
 #endif
 
 #define BUFFER_CAPACITY 4096
-#define MAX_TASKS 4
+/* Найбільше задач одночасно: основний акселерометр, --iio-aux, --iio-gyro, --gps і --ui-gpio. */
+#define MAX_TASKS 5
 
 #define STDIN_OPTION "--stdin"
 #define REPLAY_OPTION "--replay"
 #define SPEED_OPTION "--speed"
 #define IIO_OPTION "--iio"
 #define IIO_AUX_OPTION "--iio-aux"
+#define IIO_GYRO_OPTION "--iio-gyro"
 #define IIO_RATE_OPTION "--iio-rate"
 #define GPS_OPTION "--gps"
 #define GPS_BAUD_OPTION "--gps-baud"
@@ -90,8 +94,9 @@ struct options {
 	bool read_stdin;
 	const char *replay_path; /* NULL, якщо --replay не задано */
 	double replay_speed;
-	const char *iio_path;	  /* основний акселерометр, або NULL */
-	const char *iio_aux_path; /* додатковий акселерометр, або NULL */
+	const char *iio_path;	   /* основний акселерометр, або NULL */
+	const char *iio_aux_path;  /* додатковий акселерометр, або NULL */
+	const char *iio_gyro_path; /* гіроскоп (і температура) пристрою IIO, або NULL */
 	unsigned int iio_rate_hz;
 	const char *gps_path; /* NULL, якщо --gps не задано */
 	unsigned int gps_baud;
@@ -99,8 +104,9 @@ struct options {
 	const char *raw_path;	 /* NULL, якщо --dump-raw не задано */
 	unsigned int log_max_mb; /* 0: без ротації */
 	unsigned int log_keep;
-	char iio_resolved[IIO_PATH_SIZE];     /* каталог для --iio, заданого іменем */
-	char iio_aux_resolved[IIO_PATH_SIZE]; /* те саме для --iio-aux */
+	char iio_resolved[IIO_PATH_SIZE];      /* каталог для --iio, заданого іменем */
+	char iio_aux_resolved[IIO_PATH_SIZE];  /* те саме для --iio-aux */
+	char iio_gyro_resolved[IIO_PATH_SIZE]; /* те саме для --iio-gyro */
 	const char *ui_chip; /* мікросхема GPIO для кнопки й світлодіодів, або NULL */
 	bool ui_no_button;   /* лише світлодіоди, кнопки нема */
 	bool ui_active_low;  /* кнопка дає 0 при натисканні, а не 1 */
@@ -169,12 +175,14 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 	if (resolve_iio(&options.iio_path, options.iio_resolved, IIO_OPTION) < 0 ||
-	    resolve_iio(&options.iio_aux_path, options.iio_aux_resolved, IIO_AUX_OPTION) < 0) {
+	    resolve_iio(&options.iio_aux_path, options.iio_aux_resolved, IIO_AUX_OPTION) < 0 ||
+	    resolve_iio(&options.iio_gyro_path, options.iio_gyro_resolved, IIO_GYRO_OPTION) < 0) {
 		return EXIT_FAILURE;
 	}
 	if (!has_any_source(&options)) {
-		fprintf(stderr, "motion_logger: no sample source (use %s, %s, %s, %s or %s)\n",
-			STDIN_OPTION, REPLAY_OPTION, IIO_OPTION, IIO_AUX_OPTION, GPS_OPTION);
+		fprintf(stderr, "motion_logger: no sample source (use %s, %s, %s, %s, %s or %s)\n",
+			STDIN_OPTION, REPLAY_OPTION, IIO_OPTION, IIO_AUX_OPTION, IIO_GYRO_OPTION,
+			GPS_OPTION);
 		return EXIT_SUCCESS;
 	}
 
@@ -220,10 +228,10 @@ int main(int argc, char **argv)
 	}
 
 	printf("received %zu, dropped %zu, read errors %zu, logged %zu (events %zu, rows %zu, "
-	       "aux %zu, gps %zu), log errors %zu, rotations %zu, in buffer %zu\n",
+	       "aux %zu, gyro %zu, gps %zu), log errors %zu, rotations %zu, in buffer %zu\n",
 	       source_stats.received, source_stats.dropped, source_stats.errors, log_stats.written,
-	       log_stats.events, log_stats.rows, log_stats.aux, log_stats.gps, log_stats.failed,
-	       log_stats.rotations, ring_buffer_count(&buffer));
+	       log_stats.events, log_stats.rows, log_stats.aux, log_stats.gyro, log_stats.gps,
+	       log_stats.failed, log_stats.rotations, ring_buffer_count(&buffer));
 
 cleanup:
 	ring_buffer_destroy(&buffer);
@@ -265,6 +273,8 @@ static int parse_options(int argc, char **argv, struct options *options)
 			options->iio_path = argv[++i];
 		} else if (has_value && strcmp(argv[i], IIO_AUX_OPTION) == 0) {
 			options->iio_aux_path = argv[++i];
+		} else if (has_value && strcmp(argv[i], IIO_GYRO_OPTION) == 0) {
+			options->iio_gyro_path = argv[++i];
 		} else if (has_value && strcmp(argv[i], IIO_RATE_OPTION) == 0) {
 			if (parse_unsigned(argv[++i], &options->iio_rate_hz) < 0) {
 				return -EINVAL;
@@ -311,7 +321,8 @@ static int parse_options(int argc, char **argv, struct options *options)
 	if (speed_given && options->replay_path == NULL) {
 		return -EINVAL; /* швидкість має зміст лише для --replay */
 	}
-	if (rate_given && options->iio_path == NULL && options->iio_aux_path == NULL) {
+	if (rate_given && options->iio_path == NULL && options->iio_aux_path == NULL &&
+	    options->iio_gyro_path == NULL) {
 		return -EINVAL;
 	}
 	if (baud_given && options->gps_path == NULL) {
@@ -410,17 +421,19 @@ static void print_usage(const char *program)
 {
 	fprintf(stderr,
 		"usage: %s [%s | %s file [%s factor] | %s dir|name [%s hz]] [%s dir|name] "
-		"[%s port [%s baud]] [%s file [%s mb [%s n]] [%s file] [%s chip [%s | %s]]]\n",
+		"[%s dir|name] [%s port [%s baud]] [%s file [%s mb [%s n]] [%s file] "
+		"[%s chip [%s | %s]]]\n",
 		program, STDIN_OPTION, REPLAY_OPTION, SPEED_OPTION, IIO_OPTION, IIO_RATE_OPTION,
-		IIO_AUX_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION, LOG_MAX_MB_OPTION,
-		LOG_KEEP_OPTION, DUMP_RAW_OPTION, UI_GPIO_OPTION, UI_NO_BUTTON_OPTION,
-		UI_ACTIVE_LOW_OPTION);
+		IIO_AUX_OPTION, IIO_GYRO_OPTION, GPS_OPTION, GPS_BAUD_OPTION, LOG_OPTION,
+		LOG_MAX_MB_OPTION, LOG_KEEP_OPTION, DUMP_RAW_OPTION, UI_GPIO_OPTION,
+		UI_NO_BUTTON_OPTION, UI_ACTIVE_LOW_OPTION);
 }
 
 static bool has_any_source(const struct options *options)
 {
 	return options->read_stdin || options->replay_path != NULL || options->iio_path != NULL ||
-	       options->iio_aux_path != NULL || options->gps_path != NULL;
+	       options->iio_aux_path != NULL || options->iio_gyro_path != NULL ||
+	       options->gps_path != NULL;
 }
 
 /* У обробнику сигналу можна лише виставити прапорець: усе інше в ньому небезпечно. */
@@ -458,12 +471,14 @@ static int run_sources(const struct options *options, struct ring_buffer *buffer
 	struct gpiod_ui ui_driver;
 	bool ui_open = false;
 #endif
+	struct iio_accel gyro_iio;
 	size_t count = 0;
 	size_t i;
 	int result = 0;
 	bool player_open = false;
 	bool primary_iio_open = false;
 	bool aux_iio_open = false;
+	bool gyro_iio_open = false;
 	int gps_fd = -1;
 
 	memset(tasks, 0, sizeof(tasks));
@@ -519,6 +534,21 @@ static int run_sources(const struct options *options, struct ring_buffer *buffer
 		tasks[count].run = run_sensor_task;
 		tasks[count].sensor = &aux_iio.base;
 		tasks[count].source = SAMPLE_SOURCE_ACCEL2;
+		count++;
+	}
+	if (options->iio_gyro_path != NULL) {
+		result =
+		    iio_accel_open_gyro(&gyro_iio, options->iio_gyro_path, options->iio_rate_hz);
+		if (result < 0) {
+			fprintf(stderr, "motion_logger: iio-gyro %s: %s\n", options->iio_gyro_path,
+				strerror(-result));
+			goto cleanup;
+		}
+		gyro_iio_open = true;
+		tasks[count].name = "iio-gyro";
+		tasks[count].run = run_sensor_task;
+		tasks[count].sensor = &gyro_iio.base;
+		tasks[count].source = SAMPLE_SOURCE_GYRO;
 		count++;
 	}
 	if (options->gps_path != NULL) {
@@ -599,6 +629,9 @@ cleanup:
 	}
 	if (aux_iio_open) {
 		aux_iio.base.close(&aux_iio.base);
+	}
+	if (gyro_iio_open) {
+		gyro_iio.base.close(&gyro_iio.base);
 	}
 	if (gps_fd >= 0) {
 		close(gps_fd);

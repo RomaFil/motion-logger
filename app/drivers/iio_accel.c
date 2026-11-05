@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,10 @@
 /* IIO віддає прискорення в м/с²; 1 g це стандартне прискорення вільного падіння. */
 #define STANDARD_GRAVITY_MS2 9.80665
 
+/* Гіроскоп IIO віддає рад/с; у лозі градуси за секунду. */
+#define RAD_TO_DEG 57.29577951308232
+#define MILLI 1000.0
+
 static const char *const AXIS_NAMES[AXES] = {"x", "y", "z"};
 
 /* Приватні функції описано тут, а визначено внизу: публічна функція йде першою. */
@@ -33,7 +38,10 @@ static void close_accel(struct sensor *self);
 static int build_path(char *out, const char *dir, const char *name);
 static int read_number(const char *path, double *value);
 static int read_raw(int fd, double *value);
-static int read_scale(const char *dir, int axis, double *scale);
+static int read_scale(const char *dir, const char *family, int axis, double *scale);
+static int open_family(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz,
+		       const char *family, double multiplier, bool with_temperature);
+static int open_temperature(struct iio_accel *dev, const char *device_dir);
 static int wait_until(int64_t due_ms);
 static void close_all(struct iio_accel *dev);
 static int read_name(const char *devices_dir, const char *entry, char *out, size_t size);
@@ -42,6 +50,21 @@ static int read_name(const char *devices_dir, const char *entry, char *out, size
 #define NAME_TEXT_SIZE 64
 
 int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz)
+{
+	return open_family(dev, device_dir, rate_hz, "accel", 1.0 / STANDARD_GRAVITY_MS2, false);
+}
+
+int iio_accel_open_gyro(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz)
+{
+	return open_family(dev, device_dir, rate_hz, "anglvel", RAD_TO_DEG, true);
+}
+
+/*
+ * Спільне відкриття: family це "accel" чи "anglvel" (частина імені файлів), multiplier переводить
+ * масштаб IIO в потрібні одиниці (м/с² -> g, рад/с -> град/с).
+ */
+static int open_family(struct iio_accel *dev, const char *device_dir, unsigned int rate_hz,
+		       const char *family, double multiplier, bool with_temperature)
 {
 	char path[IIO_ACCEL_PATH_SIZE];
 	char name[48];
@@ -55,11 +78,12 @@ int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int r
 	for (axis = 0; axis < AXES; axis++) {
 		dev->raw_fd[axis] = -1;
 	}
+	dev->temp_fd = -1;
 
 	for (axis = 0; axis < AXES; axis++) {
-		double scale_ms2;
+		double scale;
 
-		snprintf(name, sizeof(name), "in_accel_%s_raw", AXIS_NAMES[axis]);
+		snprintf(name, sizeof(name), "in_%s_%s_raw", family, AXIS_NAMES[axis]);
 		result = build_path(path, device_dir, name);
 		if (result < 0) {
 			goto fail;
@@ -70,11 +94,17 @@ int iio_accel_open(struct iio_accel *dev, const char *device_dir, unsigned int r
 			goto fail;
 		}
 
-		result = read_scale(device_dir, axis, &scale_ms2);
+		result = read_scale(device_dir, family, axis, &scale);
 		if (result < 0) {
 			goto fail;
 		}
-		dev->g_per_count[axis] = scale_ms2 / STANDARD_GRAVITY_MS2;
+		dev->unit_per_count[axis] = scale * multiplier;
+	}
+	if (with_temperature) {
+		result = open_temperature(dev, device_dir);
+		if (result < 0) {
+			goto fail;
+		}
 	}
 
 	dev->base.read = read_accel;
@@ -158,6 +188,50 @@ static int read_name(const char *devices_dir, const char *entry, char *out, size
 	return 0;
 }
 
+/* Температура необов'язкова: нема in_temp_raw, то без неї. Масштаб обов'язковий, зсув може бути
+ * відсутній. */
+static int open_temperature(struct iio_accel *dev, const char *device_dir)
+{
+	char path[IIO_ACCEL_PATH_SIZE];
+	int result = build_path(path, device_dir, "in_temp_raw");
+
+	if (result < 0) {
+		return result;
+	}
+	dev->temp_fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (dev->temp_fd < 0) {
+		return errno == ENOENT ? 0 : -errno;
+	}
+
+	result = build_path(path, device_dir, "in_temp_scale");
+	if (result < 0) {
+		return result;
+	}
+	result = read_number(path, &dev->temp_scale);
+	if (result < 0) {
+		return result;
+	}
+	if (!isfinite(dev->temp_scale) || dev->temp_scale <= 0) {
+		return -EPROTO;
+	}
+
+	dev->temp_offset = 0.0;
+	result = build_path(path, device_dir, "in_temp_offset");
+	if (result < 0) {
+		return result;
+	}
+	result = read_number(path, &dev->temp_offset);
+	if (result == -ENOENT) {
+		dev->temp_offset = 0.0;
+		return 0;
+	}
+	if (result < 0) {
+		return result;
+	}
+
+	return isfinite(dev->temp_offset) ? 0 : -EPROTO;
+}
+
 static int read_accel(struct sensor *self, struct accel_sample *out)
 {
 	struct iio_accel *dev = (struct iio_accel *)self; /* base це перше поле */
@@ -189,10 +263,24 @@ static int read_accel(struct sensor *self, struct accel_sample *out)
 		}
 	}
 
+	if (dev->temp_fd >= 0) {
+		double raw_temperature;
+
+		result = read_raw(dev->temp_fd, &raw_temperature);
+		if (result < 0) {
+			return result;
+		}
+		out->has_temperature = true;
+		out->temperature_c = (raw_temperature + dev->temp_offset) * dev->temp_scale / MILLI;
+	} else {
+		out->has_temperature = false;
+		out->temperature_c = 0.0;
+	}
+
 	out->time_ms = now_ms;
-	out->x_g = counts[0] * dev->g_per_count[0];
-	out->y_g = counts[1] * dev->g_per_count[1];
-	out->z_g = counts[2] * dev->g_per_count[2];
+	out->x_g = counts[0] * dev->unit_per_count[0];
+	out->y_g = counts[1] * dev->unit_per_count[1];
+	out->z_g = counts[2] * dev->unit_per_count[2];
 
 	return 0;
 }
@@ -208,6 +296,10 @@ static void close_all(struct iio_accel *dev)
 			close(dev->raw_fd[axis]);
 			dev->raw_fd[axis] = -1;
 		}
+	}
+	if (dev->temp_fd >= 0) {
+		close(dev->temp_fd);
+		dev->temp_fd = -1;
 	}
 }
 
@@ -259,20 +351,21 @@ static int read_number(const char *path, double *value)
 	return result;
 }
 
-/* Масштаб осі: спершу спільний in_accel_scale, інакше in_accel_<вісь>_scale. */
-static int read_scale(const char *dir, int axis, double *scale)
+/* Масштаб осі: спершу спільний in_<family>_scale, інакше in_<family>_<вісь>_scale. */
+static int read_scale(const char *dir, const char *family, int axis, double *scale)
 {
 	char path[IIO_ACCEL_PATH_SIZE];
 	char name[48];
 	int result;
 
-	result = build_path(path, dir, "in_accel_scale");
+	snprintf(name, sizeof(name), "in_%s_scale", family);
+	result = build_path(path, dir, name);
 	if (result < 0) {
 		return result;
 	}
 	result = read_number(path, scale);
 	if (result == -ENOENT) {
-		snprintf(name, sizeof(name), "in_accel_%s_scale", AXIS_NAMES[axis]);
+		snprintf(name, sizeof(name), "in_%s_%s_scale", family, AXIS_NAMES[axis]);
 		result = build_path(path, dir, name);
 		if (result < 0) {
 			return result;

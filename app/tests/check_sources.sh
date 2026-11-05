@@ -47,6 +47,15 @@ make_iio() {
 
 make_iio "$WORK/main" 0 0 1
 make_iio "$WORK/aux" 0 0 1
+# Гіроскоп і температура в каталозі основного пристрою (як у MPU6050): 1 град/с на одиницю raw,
+# температура (raw 5 + зсув 20) * 1000 мілі-°C = 25 °C.
+printf '2\n' > "$WORK/main/in_anglvel_x_raw"
+printf -- '-1\n' > "$WORK/main/in_anglvel_y_raw"
+printf '0\n' > "$WORK/main/in_anglvel_z_raw"
+printf '0.017453292519943295\n' > "$WORK/main/in_anglvel_scale"
+printf '5\n' > "$WORK/main/in_temp_raw"
+printf '1000\n' > "$WORK/main/in_temp_scale"
+printf '20\n' > "$WORK/main/in_temp_offset"
 mkfifo "$WORK/gps"
 LOG="$WORK/log.jsonl"
 SUMMARY="$WORK/summary.txt"
@@ -54,7 +63,8 @@ SUMMARY="$WORK/summary.txt"
 # Відкриваємо канал на читання й запис одразу: поки ми його тримаємо, читач не побачить кінця даних.
 exec 3<> "$WORK/gps"
 
-"$APP" --iio "$WORK/main" --iio-aux "$WORK/aux" --gps "$WORK/gps" --log "$LOG" > "$SUMMARY" &
+"$APP" --iio "$WORK/main" --iio-aux "$WORK/aux" --iio-gyro "$WORK/main" --gps "$WORK/gps" \
+	--log "$LOG" > "$SUMMARY" &
 PID=$!
 
 cat "$DATA/gps_sample.nmea" >&3
@@ -96,6 +106,22 @@ head -n 1 "$LOG" | grep -q '"src":"log","event":"open"' || fail "no open line at
 [ "$AUX_LINES" -le $((RUN_SECONDS + 1)) ] || fail "accel2 is written more than once per second"
 grep -q '"src":"accel2","x_g":0.0000,"y_g":0.0000,"z_g":1.0000' "$LOG" ||
 	fail "accel2 line has unexpected values"
+
+# Гіроскоп: не більше рядка на секунду, значення переведені в град/с, є температура 25 °C.
+GYRO_LINES=$(count_lines '"src":"gyro"')
+[ "$GYRO_LINES" -ge 1 ] || fail "no gyro lines in the log"
+[ "$GYRO_LINES" -le $((RUN_SECONDS + 1)) ] || fail "gyro is written more than once per second"
+grep -q '"src":"gyro","x_dps":2.00,"y_dps":-1.00,"z_dps":0.00,"temp_c":25.0}' "$LOG" ||
+	fail "gyro line has unexpected values"
+
+# Додаткові поля GPS (час UTC з супутників, висота, курс, HDOP) беруться з рядків RMC і GGA файла NMEA.
+# Форма, а не значення: tests/data з feature/uboot-wifi це справжній запис (GPS із підміною), не синтетика.
+grep -q '"fix":true,.*"utc":"20[0-9][0-9]-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]Z","alt_m":-\{0,1\}[0-9][0-9.]*,"course_deg":[0-9][0-9.]*,"hdop":[0-9][0-9.]*}' "$LOG" ||
+	fail "gps line with utc, altitude, course and hdop not found"
+# Без фіксації часу UTC немає: модуль міг узяти його зі своєї пам'яті.
+if grep '"fix":false' "$LOG" | grep -q '"utc"'; then
+	fail "gps line without a fix has a utc time"
+fi
 
 case "$(cat "$SUMMARY")" in
 *"dropped 0,"*"log errors 0,"*) ;;
