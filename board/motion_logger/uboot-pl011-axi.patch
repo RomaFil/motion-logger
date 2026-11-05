@@ -1,0 +1,33 @@
+serial: pl01x: bind the Raspberry Pi 5 debug UART ("arm,pl011-axi")
+
+The firmware device tree describes the Raspberry Pi 5 debug UART (UART10,
+the three-pin JST-SH connector) as "arm,pl011-axi" only. The PL011 driver
+matched "arm,pl011" and "arm,pl010", so no serial driver was bound and
+U-Boot started with no console at all (no banner, no "U-Boot>" prompt).
+
+Match "arm,pl011-axi" as a PL011. The firmware has already configured this
+UART at 115200 8N1 (it prints its own log and BL31's on it), so skip the
+line setup as with the "skip-init" property.
+
+---
+--- a/drivers/serial/serial_pl01x.c
++++ b/drivers/serial/serial_pl01x.c
+@@ -370,6 +370,7 @@
+ #if CONFIG_IS_ENABLED(OF_REAL)
+ static const struct udevice_id pl01x_serial_id[] ={
+ 	{.compatible = "arm,pl011", .data = TYPE_PL011},
++	{.compatible = "arm,pl011-axi", .data = TYPE_PL011},
+ 	{.compatible = "arm,pl010", .data = TYPE_PL010},
+ 	{}
+ };
+@@ -408,6 +409,10 @@
+ 	}
+ 	plat->type = dev_get_driver_data(dev);
+ 	plat->skip_init = dev_read_bool(dev, "skip-init");
++	/* Raspberry Pi 5: debug UART (UART10) is already set up by the firmware at 115200,
++	 * so only bind the driver and do not touch the line settings. */
++	if (device_is_compatible(dev, "arm,pl011-axi"))
++		plat->skip_init = true;
+ 
+ 	return 0;
+ }

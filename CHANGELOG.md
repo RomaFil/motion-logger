@@ -5,6 +5,13 @@
 
 ## 05.11.2026
 
+- **Консоль: `getty` на `ttyAMA10`, U-Boot отримує консоль (`uboot-pl011-axi.patch`).** Лог з кабелем JST-SH показав
+  безкінечне `can't open /dev/ttyAMA0` від `init`: UART0 (`serial@30000`, GPIO14/15) у device tree має
+  `status = "disabled"`, пристрою `/dev/ttyAMA0` нема, а `BR2_TARGET_GENERIC_GETTY_PORT` вказував на нього.
+  Тепер `ttyAMA10` (JST Pi 5): ядро, `getty` і спам-повідомлення зникають в одному місці. Банера U-Boot у тому ж лозі не
+  було: debug-UART має `compatible = "arm,pl011-axi"`, драйвер PL011 в U-Boot його не знав. Патч додає цю сумісність і
+  пропускає налаштування лінії (її вже налаштувала прошивка). Патч накладається (`patch --dry-run` на U-Boot 2026.07);
+  **на платі ще не перевірено ні `getty` на `ttyAMA10`, ні банер U-Boot**.
 - **Кнопки: автозапуск передає `--ui-button-active-low`** (`/etc/default/motion_logger`). Після складання плати в
   корпус кнопка SW1 не реагувала. Мультиметр показав, що SW1 і SW2 замикають лінію на землю; `gpiomon
   --bias=pull-up gpiochip0 13` і `... 17` (SW1 після `S99motion_logger stop`) дали `FALLING EDGE` на натискання й

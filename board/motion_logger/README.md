@@ -7,9 +7,11 @@
 - `dts/`: DTS-overlay для датчиків (крок 4.6).
 
 ## Образ: що додано до стокового raspberrypi5_defconfig
-- `config.txt`, `cmdline.txt`: `enable_uart=1`, `enable_rp1_uart=1` (лог прошивки й `getty` на GPIO14, `ttyAMA0`).
+- `config.txt`, `cmdline.txt`: `enable_uart=1`, `enable_rp1_uart=1` (лог прошивки на GPIO14). UART0 (GPIO14/15, `DBG1`) у device tree
+  вимкнений (`status = "disabled"`), тому `/dev/ttyAMA0` у цьому образі нема.
 - `post-image.sh`, `genimage.cfg.in`: копія стокових із Buildroot 2026.08 + `bcm2712d0.dtbo` з каталогу ядра (Pi 5 з чипом D0, наприклад 16 ГБ; без нього прошивка пише `bcm2712d0.dtbo not found`).
-- Консоль входу: `BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA0"`, 115200; повідомлення ядра на GPIO14 не видно (драйвер `pl011-axi`), вони йдуть на JST-роз'єм (`ttyAMA10`).
+- Консоль входу: `BR2_TARGET_GENERIC_GETTY_PORT="ttyAMA10"`, 115200: повідомлення ядра, вхід і (з патчем `uboot-pl011-axi.patch`) банер
+  U-Boot йдуть на один JST-роз'єм. З `ttyAMA0` `init` без кінця друкував `can't open /dev/ttyAMA0`.
 - Служби `rootfs_overlay/etc/init.d`: `S12mounts` (`/boot` на запис із `sync`, `/data` з третього розділу), `S41wifi`,
   `S49ntp` (BusyBox `ntpd`), `S99motion_logger` (з наглядачем, що перезапускає програму); `S15watchdog` ставить BusyBox.
 - `genimage.cfg.in`: розділи boot, rootfs і `data` (ext4, 1 ГБ, мітка `data`).
