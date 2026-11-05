@@ -14,8 +14,9 @@ DAEMON=/usr/bin/$NAME
 PIDFILE=/var/run/$NAME.pid
 CHILD_PIDFILE=/var/run/$NAME.child.pid
 LOGFILE=/var/log/$NAME.log
-# Налагоджувальний порт DBG1 (GPIO14/15). Консоль ядра йде на ttyAMA10 (JST-рознім), а ttyAMA0
-# вільний, тож пишемо туди, щоб бачити вивід без JST-кабеля.
+# Порт DBG1 (GPIO14/15, ttyAMA0): вивід іде туди, лише якщо такий пристрій є й доступний на запис. У цьому
+# образі UART0 у device tree вимкнений, /dev/ttyAMA0 нема (і на нашій Pi RX DBG1 замкнений на землю), тож вивід
+# завжди в LOGFILE. Консоль входу на JST (ttyAMA10): туди не пишемо, щоб не змішувати з getty.
 DEBUG_TTY=/dev/ttyAMA0
 # Скільки секунд чекати завершення після SIGTERM, перш ніж вбити процес через SIGKILL.
 STOP_TIMEOUT=5
@@ -148,7 +149,8 @@ start() {
 	}
 	set_iio_rates
 
-	# Вивід: на DBG1, якщо порт доступний на запис, інакше у файл (слайд 39: логи кудись пишуться).
+	# Вивід: на DBG1, якщо такий порт є (у цьому образі нема), інакше у файл LOGFILE (слайд 39: логи кудись
+	# пишуться).
 	if [ -w "$DEBUG_TTY" ]; then
 		supervise >"$DEBUG_TTY" 2>&1 &
 	else
