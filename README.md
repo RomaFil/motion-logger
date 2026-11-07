@@ -1,3 +1,5 @@
+**English:** [README.en.md](README.en.md)
+
 # Motion Logger
 
 Фінальний проєкт стажування Ajax Embedded Linux Internship: пристрій на **Raspberry Pi 5** збирає дані
