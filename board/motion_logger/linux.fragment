@@ -1,5 +1,30 @@
 # Доповнення до конфігурації ядра Raspberry Pi (підключається через BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES).
+#
+# Усе нижче, крім ADXL345 і вимкненого INPUT_ADXL34X, СТОКОВИЙ bcm2712_defconfig форку raspberrypi/linux
+# уже вмикає. Ми дублюємо ці рядки навмисно (правило Юрія Безкора, 09.11.2026): це мінімальний набір драйверів,
+# без якого не працюють наші датчики й Wi-Fi. Якщо в іншій версії Buildroot чи ядра дефолти зміняться, або
+# проєкт переїде на іншу платформу, цей файл показує, що саме треба ввімкнути. Імена модулів, які вантажить
+# S11modules, див. rootfs_overlay/etc/modules-load.d/motion_logger.conf. Звірка з .config збірки: tests/check_kernel_fragment.sh.
+
 # ADXL345 по SPI через IIO. Старий input-драйвер вимикаємо: він збігається за тим самим іменем
-# пристрою і міг би зайняти датчик раніше.
+# пристрою і міг би зайняти датчик раніше. Це наша ЄДИНА зміна проти стокового дефолту.
 # CONFIG_INPUT_ADXL34X is not set
 CONFIG_ADXL345_SPI=m
+
+# MPU6050 (IIO) на I2C1.
+CONFIG_INV_MPU6050_IIO=m
+CONFIG_INV_MPU6050_I2C=m
+
+# I2C1 на RP1 (Designware) і /dev/i2c-N: i2cdetect і діагностика.
+CONFIG_I2C_DESIGNWARE_PLATFORM=m
+CONFIG_I2C_CHARDEV=m
+
+# SPI0 на RP1 (Designware) і /dev/spidevB.C: без них ADXL345 не побачить жоден драйвер.
+CONFIG_SPI_DESIGNWARE=m
+CONFIG_SPI_DW_MMIO=m
+CONFIG_SPI_SPIDEV=m
+
+# Wi-Fi Pi 5 (чип CYW43455 на SDIO). Без цього плата недоступна по SSH без Ethernet.
+CONFIG_CFG80211=m
+CONFIG_BRCMFMAC=m
+CONFIG_BRCMFMAC_SDIO=y

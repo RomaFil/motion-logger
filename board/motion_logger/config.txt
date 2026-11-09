@@ -10,9 +10,10 @@ disable_overscan=1
 enable_uart=1
 enable_rp1_uart=1
 
-# I2C1 (GPIO2/3) для MPU6050 і SPI0 (GPIO7-11) для ADXL345: без цих рядків вузли в device tree лишаються
-# disabled і /dev/i2c-1, /dev/spidev0.0 не з'являться. Драйвери зібрано модулями, їх вантажить
-# S11modules зі списку /etc/modules-load.d/motion_logger.conf.
+# I2C1 (GPIO2/3) для MPU6050 і SPI0 (GPIO7-11) для ADXL345. Дубль навмисно: оверлей motion-logger-sensors
+# нижче теж ставить status = "okay" для i2c1 і spi0, але шини критичні для проєкту, тому вмикаємо їх ще й тут,
+# незалежно від оверлея (правило Юрія Безкора, 09.11.2026). Що станеться без цих двох рядків, не перевіряли.
+# Драйвери зібрано модулями, їх вантажить S11modules зі списку /etc/modules-load.d/motion_logger.conf.
 dtparam=i2c_arm=on
 dtparam=spi=on
 

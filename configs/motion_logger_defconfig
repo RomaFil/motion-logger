@@ -19,6 +19,9 @@ BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,21b410
 BR2_LINUX_KERNEL_DEFCONFIG="bcm2712"
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="board/raspberrypi/linux-4k-page-size.fragment $(BR2_EXTERNAL_MOTION_LOGGER_PATH)/board/motion_logger/linux.fragment"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
+# Базові DTB, як у стоковому raspberrypi5_defconfig Buildroot: 5-b для Pi 5, d0-5-b для Pi 5 із чипом D0
+# (наша 16 ГБ, див. post-image.sh), 500 для Pi 500 нам не потрібен, але не заважає: лишаємо стоковий список.
+# Наші зміни не в цих DTB, а в overlay board/motion_logger/dts/motion-logger-sensors.dts.
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2712-rpi-5-b broadcom/bcm2712d0-rpi-5-b broadcom/bcm2712-rpi-500"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_MOTION_LOGGER_PATH)/board/motion_logger/busybox.fragment"
