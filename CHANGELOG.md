@@ -11,6 +11,12 @@
   новий `board/motion_logger/tests/check_kernel_fragment.sh` звіряє фрагмент із `.config` збірки (на зіпсованій копії
   падає). Виправлено коментар у `config.txt` про `dtparam` (дубль навмисний), пояснено три базові DTB у defconfig,
   `cmdline.txt` у README, відсутність `interrupts` у MPU6050. Поведінка на платі не змінюється.
+  **Образ `52a63cb`** (SHA-256 `ccf4db871d989bfdc8b4fbd031f54020fad3c91585b61ac44c55966f69f6a6c1`) зібрано на VPS і
+  перевірено без плати проти `3ed1ef6`: розмітка, ядро (`.config`, `Image`, модулі), DTB і overlay, застосунок
+  збігаються побайтово; відрізняються лише коментарі в `config.txt`, `S99motion_logger` і `etc/default/dropbear`,
+  рядок дати збірки в банері U-Boot (`Nov 09 2026 - 20:19:03`, 7 байтів у `u-boot.bin`), мітка часу заголовка
+  `boot.scr` (сам скрипт ідентичний) і сіль пароля root (хеш відповідає паролю з defconfig). `fdtoverlay` накладає
+  наш overlay на `bcm2712d0-rpi-5-b.dtb`. **На платі не перевірено.**
 
 ## 05.11.2026
 
