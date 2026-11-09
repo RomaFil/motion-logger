@@ -10,14 +10,22 @@
 | `fragment@1` | `&spi0` (CE0 = GPIO8) | вмикає шину, додає `accelerometer@0` з `compatible = "adi,adxl345"`, `spi-max-frequency = <5000000>`, `spi-cpol`, `spi-cpha` |
 | `fragment@2` | `&spidev0` | `status = "disabled"`: базове дерево вже віддає CE0 загальному `spidev`, а на одному CS не може бути двох власників |
 
-Лінія переривання ADXL345 (INT1) на платі не підключена, тому `interrupts` не задано: драйвер працює лише з читанням сирих значень, нам цього досить (100 Гц опитування).
+Лінія переривання ADXL345 (INT1) на платі не підключена, тому `interrupts` не задано: драйвер працює лише з читанням сирих значень, нам цього досить (100 Гц опитування). Те саме для MPU6050: `INTA` і `DRDY` модуля GY-87 не підключені, буферного режиму FIFO драйвер не отримує.
+
+## Правило: що дублюємо і що коментуємо
+
+Ментор (Юрій Безкор, 09.11.2026) про вимогу ТЗ «DTS (лише потрібні зміни)»: якщо стокова опція потрібна для нашої прошивки, її можна лишити як є, але **критичну краще продублювати в локальній конфігурації**, щоб при зміні версії Buildroot чи міграції на іншу платформу було видно мінімально необхідну конфігурацію, і **прокоментувати, навіщо**. Тому:
+
+- перелік критичних драйверів ядра (датчики, I2C/SPI Designware, `spidev`, `i2c-dev`, Wi-Fi) повторено в `board/motion_logger/linux.fragment`, хоча більшість із них уже вмикає стоковий `bcm2712_defconfig`; звірка з `.config` збірки: `sh board/motion_logger/tests/check_kernel_fragment.sh <build/linux-custom/.config>`;
+- шини I2C1 і SPI0 вмикаються і в overlay (`status = "okay"`), і рядками `dtparam=i2c_arm=on` та `dtparam=spi=on` у `config.txt`;
+- решту стокового (непотрібні DTB тощо) не чіпаємо: воно не заважає. Три базові DTB у defconfig лишено стоковими з коментарем.
 
 ## Як overlay потрапляє в образ
 
 1. `board/motion_logger/post-image.sh` компілює файл `dtc` із дерева зібраного ядра з ключем `-@` (він додає розділ `__fixups__`, за яким прошивка знаходить мітки `i2c1`, `spi0`, `spidev0` у базовому дереві). Результат: `rpi-firmware/overlays/motion-logger-sensors.dtbo`.
 2. Той самий скрипт копіює `uart2-pi5.dtbo` з ядра (UART2 для GPS на `/dev/ttyAMA2`) та `bcm2712d0.dtbo`.
 3. `board/motion_logger/config.txt` підключає overlay рядком `dtoverlay=motion-logger-sensors` (і `dtoverlay=uart2-pi5`); прошивка плати застосовує їх до базового дерева ще до запуску ядра.
-4. Драйвери зібрано модулями (`CONFIG_ADXL345_SPI=m` додано фрагментом `board/motion_logger/linux.fragment`, старий `INPUT_ADXL34X` вимкнено, бо блокує новий), їх вантажить `S11modules` зі списку `etc/modules-load.d/motion_logger.conf`.
+4. Драйвери зібрано модулями. Єдина наша зміна проти стокового ядра: `CONFIG_ADXL345_SPI=m` і вимкнений старий `INPUT_ADXL34X` (він блокує новий драйвер); решта рядків `board/motion_logger/linux.fragment` дублює стокові значення (див. «Правило» вище). Модулі вантажить `S11modules` зі списку `etc/modules-load.d/motion_logger.conf`.
 
 ## Як перевірити на платі
 
